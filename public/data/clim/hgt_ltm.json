@@ -1,0 +1,29 @@
+{
+  "source": "NCEP/NCAR Reanalysis 1991-2020 monthly long-term mean (NOAA PSL)",
+  "units": "m",
+  "scale": 1,
+  "dtype": "int16le",
+  "layout": "[month][level][lat][lon]",
+  "levels": [
+    1000,
+    925,
+    850,
+    700,
+    600,
+    500,
+    400,
+    300,
+    250,
+    200,
+    150,
+    100,
+    50,
+    10
+  ],
+  "nlat": 73,
+  "nlon": 144,
+  "lat0": 90.0,
+  "dlat": -2.5,
+  "lon0": 0.0,
+  "dlon": 2.5
+}

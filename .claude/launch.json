@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "model-globe",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "server/server.js"
+      ],
+      "port": 8642
+    },
+    {
+      "name": "model-globe-alt",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "server/server.js"
+      ],
+      "env": {
+        "PORT": "8643"
+      },
+      "port": 8643
+    }
+  ]
+}

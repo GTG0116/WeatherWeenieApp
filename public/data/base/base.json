@@ -1,0 +1,22 @@
+{
+  "land": {
+    "width": 8192,
+    "height": 4096,
+    "source": "Natural Earth 10m land minus 10m lakes"
+  },
+  "relief": {
+    "discipline": 0,
+    "category": 3,
+    "number": 4,
+    "forecastHours": 0,
+    "surfaceType": 1,
+    "surfaceValue": -2.147483647e+136,
+    "ni": 1440,
+    "nj": 721,
+    "lat0": 90,
+    "lon0": 180,
+    "dlat": -0.25,
+    "dlon": 0.25,
+    "source": "ECMWF IFS orography"
+  }
+}

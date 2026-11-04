@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Model Globe</title>
+    <meta name="description" content="Global and North American weather models and ensembles (ECMWF IFS, AIFS & ENS, GFS, GEFS, AIGFS, ICON, GEPS, HRRR, RRFS, REFS, RAP) and NEXRAD / TDWR radar on a WebGL globe, decoded in your browser." />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="css/app.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three/build/three.module.min.js",
+          "three/addons/": "./vendor/three/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="globe"></div>
+      <div id="labels"></div>
+      <div id="radar-markers"></div>
+    </div>
+
+    <aside id="panel" aria-label="Model controls">
+      <header class="brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2" opacity=".35" />
+          <path d="M5 13c5 3 9-4 14-1s6 4 9 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          <path d="M4.5 19c5 3 9-4 14-1s6 4 9 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".6" />
+        </svg>
+        <div>
+          <div class="brand-name">Model Globe</div>
+          <div class="brand-sub">Global NWP viewer</div>
+        </div>
+        <button id="panel-toggle" class="icon-btn" title="Hide panel" aria-label="Toggle panel">
+          <svg viewBox="0 0 20 20"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </header>
+
+      <div class="segmented mode-switch" id="mode-switch" role="tablist" aria-label="Sidebar focus">
+        <button data-mode="model" role="tab">Models</button>
+        <button data-mode="radar" role="tab">Radar</button>
+      </div>
+
+      <section class="block model-only">
+        <div class="block-title">Model</div>
+        <div class="model-card">
+          <div id="models"></div>
+          <label class="field model-only">
+            <span>Run</span>
+            <select id="run-select"><option>Loading…</option></select>
+          </label>
+          <label class="field model-only" id="member-field" hidden>
+            <span>Mem.</span>
+            <select id="member-select"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="block radar-only" id="radar-sites-block">
+        <div class="block-title">Radars <span class="hint" id="radar-count"></span></div>
+        <div id="radar-site-info"></div>
+        <input id="radar-search" type="search" placeholder="Search ID, city or state" autocomplete="off" spellcheck="false" />
+        <div id="radar-sites"></div>
+      </section>
+
+      <div id="radar-sections" class="radar-only"></div>
+
+      <section class="block radar-only" id="radar-tilt-block" hidden>
+        <div class="block-title">Tilt <span class="hint">elevation angle</span></div>
+        <div id="radar-tilts" class="pills"></div>
+      </section>
+
+      <section class="block radar-only" id="radar-3d-block">
+        <div class="block-title">3D radar <span class="hint">Level II, every tilt</span></div>
+        <div class="toggle" id="radar-3d-toggle">
+          <span>3D view<span class="sub" id="radar-3d-sub">Tilt the map and draw the whole scan · 3</span></span><span class="switch"></span>
+        </div>
+        <div id="radar-3d-opts" hidden>
+          <div class="vol-box-row">
+            <span id="radar-3d-box-label">No box yet</span>
+            <button id="radar-3d-box" class="mini-btn" title="Pick another area around the radar">New box</button>
+          </div>
+          <div class="segmented" id="radar-3d-style">
+            <button data-style="iso" title="A lit surface around everything past the threshold">Isosurface</button>
+            <button data-style="volume" title="A translucent cloud, denser where the echo is stronger">Volumetric</button>
+          </div>
+          <label class="slider-row">
+            <span id="radar-3d-threshold-name">Threshold</span>
+            <output id="radar-3d-threshold-val"></output>
+            <input id="radar-3d-threshold" type="range" />
+          </label>
+          <label class="slider-row">
+            <span>Height stretch</span>
+            <output id="radar-3d-exag-val"></output>
+            <input id="radar-3d-exag" type="range" min="1" max="8" step="0.5" />
+          </label>
+          <div class="alpha-editor">
+            <div class="alpha-head">
+              <span id="radar-3d-alpha-title">Volume alpha</span>
+              <button id="radar-3d-alpha-reset" class="mini-btn" title="Back to the default curve (or double-click the graph)">Reset</button>
+            </div>
+            <canvas id="radar-3d-alpha" title="Drag across to draw how opaque each value is"></canvas>
+          </div>
+          <div class="vol-info" id="radar-3d-info"></div>
+          <div class="vol-help">Drag to orbit · right-drag to pan · scroll to zoom</div>
+        </div>
+      </section>
+
+      <section class="block radar-only" id="radar-ctable-block">
+        <div class="block-title">Color table <span class="hint" id="radar-ctable-product"></span></div>
+        <div class="ctable">
+          <span id="radar-ctable-name">Default</span>
+          <button id="radar-ctable-upload" class="mini-btn">Upload…</button>
+          <button id="radar-ctable-reset" class="mini-btn">Reset</button>
+        </div>
+        <input id="radar-ctable-file" type="file" accept=".pal,.txt,.csv,text/plain" hidden />
+      </section>
+
+      <section class="block model-only">
+        <div class="block-title">Upper air</div>
+        <div id="products-upper" class="product-list"></div>
+      </section>
+
+      <section class="block model-only" id="level-block">
+        <div class="block-title">Level <span class="hint">hPa</span></div>
+        <div id="options" class="pills"></div>
+      </section>
+
+      <section class="block model-only">
+        <div class="block-title">Surface</div>
+        <div id="products-surface" class="product-list"></div>
+      </section>
+
+      <section class="block model-only">
+        <div class="block-title">Severe weather</div>
+        <div id="products-severe" class="product-list"></div>
+      </section>
+
+      <section class="block model-only">
+        <div class="block-title">Precipitation <span class="hint">QPF</span></div>
+        <div id="products-precip" class="product-list"></div>
+      </section>
+
+      <section class="block model-only">
+        <div class="block-title">Winter <span class="hint">totals since F000</span></div>
+        <div id="products-winter" class="product-list"></div>
+      </section>
+
+      <section class="block">
+        <div class="block-title">Overlays</div>
+        <div id="overlays" class="toggles"></div>
+      </section>
+
+      <section class="block">
+        <div class="block-title">Units</div>
+        <div class="segmented" id="units">
+          <button data-units="imperial">°F · mph · in</button>
+          <button data-units="metric">°C · km/h · mm</button>
+        </div>
+      </section>
+
+      <footer class="foot">
+        Data: <span id="credit">—</span>, decoded in your browser. Climatology: NCEP/NCAR R1 1991–2020. Map: Natural Earth, US Census, GeoNames.
+      </footer>
+    </aside>
+
+    <button id="panel-open" class="icon-btn floating" title="Show panel" aria-label="Show panel">
+      <svg viewBox="0 0 20 20"><path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+
+    <header id="headline">
+      <div id="title">—</div>
+      <div id="validtime">
+        <span id="valid-utc">—</span>
+        <span class="sep">·</span>
+        <span id="valid-local"></span>
+        <span class="fhour" id="fhour">F000</span>
+      </div>
+    </header>
+
+    <div id="map-tools">
+      <button class="icon-btn" id="zoom-in" title="Zoom in" aria-label="Zoom in">
+        <svg viewBox="0 0 20 20"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn" id="zoom-out" title="Zoom out" aria-label="Zoom out">
+        <svg viewBox="0 0 20 20"><path d="M4.5 10h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn" id="home" title="Reset view" aria-label="Reset view">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 10h12M10 4c-2.6 3.4-2.6 8.6 0 12M10 4c2.6 3.4 2.6 8.6 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <div class="tool-sep"></div>
+      <button class="icon-btn tool" data-tool="point" title="Sounding: click a point (S), or right-click the map" aria-label="Point sounding">
+        <svg viewBox="0 0 20 20"><path d="M3 17h14M3 17V3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M7 16c1-3 0-5 2-8s3-4 3-5" fill="none" stroke="#ff6b6b" stroke-width="1.8" stroke-linecap="round"/><path d="M5 16c1-3 1-5 2-7" fill="none" stroke="#3ddc84" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn tool" data-tool="box" title="Box sounding: click two corners (B), or right-drag on the map" aria-label="Box sounding">
+        <svg viewBox="0 0 20 20"><rect x="4" y="4" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2"/><path d="M8 13c.7-2 .3-3 1.5-5s2-3 2-3.5" fill="none" stroke="#ff6b6b" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn tool" data-tool="line" title="Cross section: click the start and end (X)" aria-label="Cross section">
+        <svg viewBox="0 0 20 20"><path d="M3.5 14.5 16.5 5.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.5" cy="14.5" r="2" fill="currentColor"/><circle cx="16.5" cy="5.5" r="2" fill="currentColor"/></svg>
+      </button>
+    </div>
+    <div id="tool-hint" hidden></div>
+
+    <div id="legend"></div>
+
+    <div id="timeline">
+      <button id="play" class="play" title="Play (space)" aria-label="Play">
+        <svg class="i-play" viewBox="0 0 20 20"><path d="M6.5 4.5v11l9-5.5z" fill="currentColor"/></svg>
+        <svg class="i-pause" viewBox="0 0 20 20"><path d="M6 4.5h2.8v11H6zM11.2 4.5H14v11h-2.8z" fill="currentColor"/></svg>
+      </button>
+      <button id="step-back" class="icon-btn small" title="Previous step (←)" aria-label="Previous step">
+        <svg viewBox="0 0 20 20"><path d="M12 5 7 10l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="track-wrap">
+        <div id="days"></div>
+        <input id="step" type="range" min="0" max="0" value="0" step="1" aria-label="Forecast hour" />
+        <div id="ticks"></div>
+      </div>
+      <button id="step-fwd" class="icon-btn small" title="Next step (→)" aria-label="Next step">
+        <svg viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+
+    <div id="status"><span class="spinner"></span><span id="status-text">Starting…</span></div>
+    <div id="tooltip"></div>
+    <div id="radar-menu" role="menu" hidden></div>
+
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
