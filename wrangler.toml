@@ -1,7 +1,7 @@
 # Cloudflare Workers (`npx wrangler deploy`, which is what Workers Builds runs).
 # The site is the static public/ folder (no build step); worker/index.js only
 # handles /proxy/* (the GEPS relay). public/_headers still applies.
-name = "model-globe"
+name = "gtg0116weather"
 main = "worker/index.js"
 compatibility_date = "2026-10-01"
 
