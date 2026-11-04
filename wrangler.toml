@@ -1,4 +1,11 @@
-# Cloudflare Pages: the site is the static public/ folder; there is no build step.
+# Cloudflare Workers (`npx wrangler deploy`, which is what Workers Builds runs).
+# The site is the static public/ folder (no build step); worker/index.js only
+# handles /proxy/* (the GEPS relay). public/_headers still applies.
 name = "model-globe"
+main = "worker/index.js"
 compatibility_date = "2026-10-01"
-pages_build_output_dir = "./public"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/proxy/*"]

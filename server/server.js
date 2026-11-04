@@ -2,8 +2,8 @@
 // public/: the browser fetches model data straight from the public buckets, so
 // this mostly serves files (GitHub Pages / Cloudflare Pages do the same in
 // production). The one exception is /proxy/msc/: Canada's MSC Datamart (GEPS)
-// sends no CORS headers, so those requests are relayed (functions/proxy/msc
-// does the same on Cloudflare Pages).
+// sends no CORS headers, so those requests are relayed (worker/index.js
+// does the same on Cloudflare).
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';

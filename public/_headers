@@ -1,4 +1,4 @@
-# Cloudflare Pages response headers (GitHub Pages ignores this file).
+# Cloudflare response headers (Workers static assets and Pages; GitHub Pages ignores this file).
 /data/*
   Cache-Control: public, max-age=604800
 /vendor/*
