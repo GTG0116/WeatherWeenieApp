@@ -1127,6 +1127,19 @@ function fmtLatLon(lat, lon) {
   return `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'}  ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
 }
 
+/** Beside the mouse, or above a finger (where the finger doesn't cover it). */
+function placeTip(tip) {
+  const { x, y, touch } = lastPointer;
+  const w = tip.offsetWidth;
+  const h = tip.offsetHeight;
+  let left = touch ? x - w / 2 : x + 16;
+  let top = touch ? y - h - 30 : y + 16;
+  if (touch && top < 8) top = y + 30;
+  left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
+  top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
+  tip.style.transform = `translate(${left}px, ${top}px)`;
+}
+
 function refreshTooltip() {
   const tip = $('#tooltip');
   if (!lastPointer || !current) {
@@ -1146,9 +1159,7 @@ function refreshTooltip() {
   if (!Number.isFinite(v)) {
     tip.innerHTML = `<div class="tx">Outside the ${modelName()} domain</div><div class="tl">${fmtLatLon(ll.lat, ll.lon)}</div>`;
     tip.style.display = 'block';
-    const x = Math.min(window.innerWidth - tip.offsetWidth - 8, lastPointer.x + 16);
-    const y = Math.min(window.innerHeight - tip.offsetHeight - 8, lastPointer.y + 16);
-    tip.style.transform = `translate(${x}px, ${y}px)`;
+    placeTip(tip);
     return;
   }
   let row = 0;
@@ -1167,9 +1178,7 @@ function refreshTooltip() {
     (extra ? `<div class="tx">${extra}</div>` : '') +
     `<div class="tl">${fmtLatLon(ll.lat, ll.lon)}</div>`;
   tip.style.display = 'block';
-  const x = Math.min(window.innerWidth - tip.offsetWidth - 8, lastPointer.x + 16);
-  const y = Math.min(window.innerHeight - tip.offsetHeight - 8, lastPointer.y + 16);
-  tip.style.transform = `translate(${x}px, ${y}px)`;
+  placeTip(tip);
 }
 
 function radarTooltip(tip, ll) {
@@ -1196,9 +1205,7 @@ function radarTooltip(tip, ll) {
   }
   tip.innerHTML = head + `<div class="tx">${where}</div><div class="tl">${fmtLatLon(ll.lat, ll.lon)}</div>`;
   tip.style.display = 'block';
-  const x = Math.min(window.innerWidth - tip.offsetWidth - 8, lastPointer.x + 16);
-  const y = Math.min(window.innerHeight - tip.offsetHeight - 8, lastPointer.y + 16);
-  tip.style.transform = `translate(${x}px, ${y}px)`;
+  placeTip(tip);
 }
 
 // ------------------------------------------------------------------ radar right-click menu
@@ -1261,6 +1268,87 @@ function setPlaying(on) {
   else refreshPanels();
 }
 
+// ------------------------------------------------------------------ touch
+const isPhone = () => matchMedia('(max-width: 760px)').matches;
+let lastHold = 0;
+
+/**
+ * One-finger gestures on the map that OrbitControls doesn't use: tap,
+ * double tap and press-and-hold. Any movement or a second finger cancels.
+ */
+function bindTouch(el, { tap, doubleTap, hold }) {
+  let t = null; // {id, x, y, at, timer, held}
+  let lastTap = null;
+  const cancel = () => {
+    if (t) clearTimeout(t.timer);
+    t = null;
+  };
+  el.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    if (t) return cancel(); // second finger: a pinch
+    $('#tooltip').style.display = 'none';
+    lastPointer = null;
+    // Event timestamps, not the clock: a slow frame between down and up isn't a long press.
+    const cur = { id: e.pointerId, x: e.clientX, y: e.clientY, at: e.timeStamp, held: false };
+    cur.timer = setTimeout(() => {
+      if (t !== cur || !hold(cur.x, cur.y)) return;
+      cur.held = true;
+      lastHold = performance.now();
+      navigator.vibrate?.(12);
+    }, 550);
+    t = cur;
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (t && e.pointerId === t.id && Math.hypot(e.clientX - t.x, e.clientY - t.y) > 10) cancel();
+  });
+  el.addEventListener('pointercancel', cancel);
+  el.addEventListener('pointerup', (e) => {
+    if (!t || e.pointerId !== t.id) return;
+    const cur = t;
+    cancel();
+    if (cur.held || e.timeStamp - cur.at > 450) return;
+    const now = e.timeStamp;
+    if (lastTap && now - lastTap.at < 320 && Math.hypot(cur.x - lastTap.x, cur.y - lastTap.y) < 40) {
+      lastTap = null;
+      doubleTap(cur.x, cur.y);
+      return;
+    }
+    lastTap = { x: cur.x, y: cur.y, at: now };
+    tap(cur.x, cur.y);
+  });
+}
+
+/** Phones: the panel is a bottom sheet; drag its header down to put it away. */
+function bindSheet(showPanel) {
+  const panel = $('#panel');
+  const head = panel.querySelector('.brand');
+  let drag = null;
+  head.addEventListener('pointerdown', (e) => {
+    if (!isPhone() || e.target.closest('button')) return;
+    drag = { id: e.pointerId, y: e.clientY, at: performance.now(), dy: 0 };
+    head.setPointerCapture(e.pointerId);
+    panel.classList.add('dragging');
+  });
+  head.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag.dy = Math.max(0, e.clientY - drag.y);
+    panel.style.transform = `translateY(${drag.dy}px)`;
+  });
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const { dy, at } = drag;
+    drag = null;
+    panel.classList.remove('dragging');
+    panel.style.transform = '';
+    const flick = dy > 30 && dy / (performance.now() - at) > 0.5;
+    if (dy > Math.min(120, panel.offsetHeight * 0.25) || flick) showPanel(false);
+  };
+  head.addEventListener('pointerup', end);
+  head.addEventListener('pointercancel', end);
+  // Opening a sounding or cross section on a phone: get the sheet out of the way.
+  for (const b of document.querySelectorAll('#map-tools .tool')) b.addEventListener('click', () => isPhone() && showPanel(false));
+}
+
 // ------------------------------------------------------------------ events
 function bindEvents() {
   $('#run-select').addEventListener('change', (e) => {
@@ -1293,14 +1381,13 @@ function bindEvents() {
   document.querySelectorAll('#map-tools .tool').forEach((b) => b.addEventListener('click', () => tools.toggle(b.dataset.tool)));
   const syncOffset = () =>
     globe.setCenterOffset(window.innerWidth > 760 && !document.body.classList.contains('panel-hidden') ? 145 : 0);
-  $('#panel-toggle').addEventListener('click', () => {
-    document.body.classList.add('panel-hidden');
+  const showPanel = (on) => {
+    document.body.classList.toggle('panel-hidden', !on);
     syncOffset();
-  });
-  $('#panel-open').addEventListener('click', () => {
-    document.body.classList.remove('panel-hidden');
-    syncOffset();
-  });
+  };
+  $('#panel-toggle').addEventListener('click', () => showPanel(false));
+  $('#panel-open').addEventListener('click', () => showPanel(true));
+  bindSheet(showPanel);
   window.addEventListener('resize', () => {
     syncOffset();
     if (state.run || radarMode()) buildTimeline();
@@ -1313,27 +1400,67 @@ function bindEvents() {
   canvas.addEventListener('pointerdown', (e) => {
     dragging = true;
     downAt = { x: e.clientX, y: e.clientY };
+    // Phones: touching the map puts the controls sheet away.
+    if (e.pointerType === 'touch' && isPhone() && !document.body.classList.contains('panel-hidden')) showPanel(false);
   });
   window.addEventListener('pointerup', () => (dragging = false));
   canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') {
+      // A finger only reads out values when it taps (bindTouch); dragging turns the globe.
+      if (dragging) $('#tooltip').style.display = 'none';
+      return;
+    }
     lastPointer = { x: e.clientX, y: e.clientY };
     if (!dragging) refreshTooltip();
     else $('#tooltip').style.display = 'none';
   });
-  canvas.addEventListener('pointerleave', () => {
+  canvas.addEventListener('pointerleave', (e) => {
+    if (e.pointerType === 'touch') return; // fires right after every tap
     lastPointer = null;
     refreshTooltip();
   });
+  const zoomAt = (x, y) => {
+    const ll = globe.pick(x, y);
+    if (ll) globe.flyTo(ll.lat, ll.lon, 1 + globe.altitude * 0.45);
+  };
+  let touchZoomAt = 0;
   canvas.addEventListener('dblclick', (e) => {
     // Two quick clicks while picking a box or line aren't a zoom request.
     if (tools.mode || performance.now() - tools.lastPick < 600) return;
-    const ll = globe.pick(e.clientX, e.clientY);
-    if (ll) globe.flyTo(ll.lat, ll.lon, 1 + globe.altitude * 0.45);
+    if (performance.now() - touchZoomAt < 700) return; // a double tap, already handled
+    zoomAt(e.clientX, e.clientY);
+  });
+  bindTouch(canvas, {
+    tap(x, y) {
+      if (tools.mode || radar3d.picking) return; // the tool takes the tap
+      lastPointer = { x, y, touch: true };
+      refreshTooltip();
+    },
+    doubleTap(x, y) {
+      if (tools.mode || radar3d.picking || performance.now() - tools.lastPick < 600) return;
+      touchZoomAt = performance.now();
+      lastPointer = null;
+      refreshTooltip();
+      zoomAt(x, y);
+    },
+    // Press and hold: what a right-click does (radar menu, or a sounding).
+    hold(x, y) {
+      if (tools.mode || radar3d.picking || globe.tilted) return false;
+      const ll = globe.pick(x, y);
+      if (!ll) return false;
+      lastPointer = null;
+      refreshTooltip();
+      if (radarMode()) openRadarMenu(x, y, ll);
+      else if (hasProfiles(state.model, state.member)) tools.soundingAt(ll);
+      else return false;
+      return true;
+    },
   });
 
   // Radar: right-click for the nearest NEXRAD or an HRRR sounding at that spot.
   canvas.addEventListener('contextmenu', (e) => {
     if (!radarMode()) return;
+    if (performance.now() - lastHold < 1000) return e.preventDefault(); // the long press already opened it
     // In the 3D view a right-drag pans: only a click opens the menu.
     if (globe.tilted && downAt && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return e.preventDefault();
     const ll = globe.pick(e.clientX, e.clientY);

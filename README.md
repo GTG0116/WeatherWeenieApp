@@ -291,6 +291,12 @@ point, ←/→ to step through forecast hours, space to play, ↑/↓ to change 
 sounding, box sounding or cross section (or right-click for a sounding, right-drag for a box
 sounding), Esc to cancel or close.
 
+On a phone or tablet: drag to rotate, pinch to zoom (the spot between your fingers stays
+put), drag with two fingers to pan, tap for the value at a point, double-tap to zoom in, and
+press and hold where you'd right-click on a desktop (a sounding, or the radar menu). The
+controls open as a bottom sheet from the layers button at top left; tap the map or drag
+the sheet down to put it away.
+
 **City values** (the model's value above each town name) can be switched on for any product
 under Overlays. They're on by default for surface temperature, dew point, wind and gusts,
 CAPE, lapse rates, LCL, STP, SRH, DCAPE, QPF and the winter totals, and remembered per
