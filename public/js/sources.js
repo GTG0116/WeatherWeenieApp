@@ -364,7 +364,7 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
 // ---------------------------------------------------------------------------
 // Canadian GEPS from the MSC Datamart. dd.weather.gc.ca sends no CORS headers,
 // so requests go through a same-origin proxy (server/server.js locally,
-// functions/proxy/msc on Cloudflare Pages). Each file holds one variable for
+// worker/index.js on Cloudflare). Each file holds one variable for
 // all 21 members, JPEG 2000 packed.
 
 const MSC_PROXY = 'proxy/msc';

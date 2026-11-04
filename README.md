@@ -49,8 +49,9 @@ server doesn't allow cross-origin requests.
 
 GEPS is the one model the browser can't fetch directly: Canada's `dd.weather.gc.ca` sends
 no CORS headers, so the app relays it through a same-origin proxy that passes only GEPS raw
-files (`server/server.js` locally, `functions/proxy/msc` on Cloudflare Pages). GitHub Pages
-can't run the proxy, so there GEPS shows a message instead of loading.
+files (`server/server.js` locally, `worker/index.js` on Cloudflare Workers,
+`functions/proxy/msc` on Cloudflare Pages). GitHub Pages can't run the proxy, so there GEPS
+shows a message instead of loading.
 
 ## Products
 
@@ -321,14 +322,22 @@ GEPS proxy. No `npm install` is needed;
 
 All paths in the app are relative, so it works from a project sub-path like `/<repo>/`.
 
-## Publish on Cloudflare Pages
+## Publish on Cloudflare (Workers)
 
-1. In the Cloudflare dashboard: **Workers & Pages → Create → Pages → Connect to Git**, and
-   pick the repository.
-2. Framework preset **None**, build command empty, build output directory **`public`**.
-   (`wrangler.toml` sets `pages_build_output_dir = "./public"`, so this is usually filled in.)
-3. Save and deploy. Every push redeploys. `public/_headers` adds browser caching for the
-   map data, and `functions/proxy/msc` is deployed as a Pages Function (the GEPS proxy).
+1. In the Cloudflare dashboard: **Workers & Pages → Create → Import a repository**, and pick
+   the repository.
+2. Leave the build command empty and the deploy command as `npx wrangler deploy`.
+3. Save and deploy. Every push redeploys. `wrangler.toml` serves `public/` as static assets
+   (with the caching rules in `public/_headers`) and runs `worker/index.js` only for
+   `/proxy/*`, which is the GEPS proxy.
+
+The Worker name in the dashboard must match `name` in `wrangler.toml` (`model-globe`). If
+your Worker has a different name, change one of them so they match.
+
+Prefer a **Pages** project instead? Use **Create → Pages → Connect to Git**, set the build
+output directory to `public`, and leave the build command empty. Pages ignores this
+`wrangler.toml` and deploys `functions/proxy/msc` as the GEPS proxy. Don't use
+`wrangler deploy` with a Pages project.
 
 ## Data
 
