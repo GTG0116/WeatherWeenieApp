@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#04070c" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Model Globe</title>
     <meta name="description" content="Global and North American weather models and ensembles (ECMWF IFS, AIFS & ENS, GFS, GEFS, AIGFS, ICON, GEPS, HRRR, RRFS, REFS, RAP) and NEXRAD / TDWR radar on a WebGL globe, decoded in your browser." />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
@@ -17,6 +21,10 @@
     </script>
   </head>
   <body>
+    <script>
+      // Phones start on the map; the controls open as a bottom sheet.
+      if (matchMedia('(max-width: 760px)').matches) document.body.classList.add('panel-hidden');
+    </script>
     <div id="stage">
       <div id="globe"></div>
       <div id="labels"></div>
@@ -25,6 +33,7 @@
 
     <aside id="panel" aria-label="Model controls">
       <header class="brand">
+        <div class="sheet-grip" aria-hidden="true"></div>
         <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
           <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2" opacity=".35" />
           <path d="M5 13c5 3 9-4 14-1s6 4 9 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -168,7 +177,7 @@
     </aside>
 
     <button id="panel-open" class="icon-btn floating" title="Show panel" aria-label="Show panel">
-      <svg viewBox="0 0 20 20"><path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 20 20"><path d="M10 3 2.5 7 10 11l7.5-4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m2.5 10.5 7.5 4 7.5-4M2.5 14l7.5 4 7.5-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
 
     <header id="headline">

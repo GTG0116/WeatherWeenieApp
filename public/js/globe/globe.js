@@ -290,6 +290,7 @@ export class Globe {
     this.controls.dampingFactor = 0.09;
     this.controls.minPolarAngle = 0.02;
     this.controls.maxPolarAngle = Math.PI - 0.02;
+    this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: -1 }; // see #bindPinch
     this.controls.addEventListener('change', () => (this.dirty = true));
 
     this.uniforms = {
@@ -406,6 +407,69 @@ export class Globe {
       },
       { passive: false },
     );
+    this.#bindPinch(el);
+  }
+
+  /**
+   * Two-finger touch on the straight-down globe: pinch to zoom and drag to
+   * pan, keeping the ground under the fingers where it is (OrbitControls'
+   * own pinch dollies the camera, which this view doesn't use). The tilted
+   * view leaves touch to OrbitControls, where pinch and two-finger pan work.
+   */
+  #bindPinch(el) {
+    const touches = new Map(); // pointerId -> {x, y}
+    let pinch = null; // {dist, mid, anchor}: anchor is the ground point held under the midpoint
+    const measure = () => {
+      const [a, b] = [...touches.values()];
+      return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+    };
+    const start = () => {
+      pinch = touches.size === 2 && !this.tiltState && !this.tiltAnim ? measure() : null;
+      if (!pinch) return;
+      this.flight = null;
+      this.distance = this.targetDistance = this.camera.position.length();
+      this.camera.updateMatrixWorld();
+      pinch.anchor = this.#pickVector(pinch.mid.x, pinch.mid.y);
+      this.controls._sphericalDelta?.set(0, 0, 0); // no leftover one-finger spin
+    };
+    const end = (e) => {
+      if (!touches.delete(e.pointerId)) return;
+      start();
+    };
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'touch') return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      start();
+    });
+    el.addEventListener('pointermove', (e) => {
+      const t = touches.get(e.pointerId);
+      if (!t) return;
+      t.x = e.clientX;
+      t.y = e.clientY;
+      if (!pinch) return;
+      if (this.tiltState || this.tiltAnim) return void (pinch = null);
+      const now = measure();
+      const alt = Math.min(5.5, Math.max(0.03, (this.distance - 1) * (pinch.dist / now.dist)));
+      this.distance = this.targetDistance = 1 + alt;
+      this.camera.position.setLength(this.distance);
+      this.camera.updateMatrixWorld();
+      // Turn the globe so the spot first under the fingers' midpoint is under it again.
+      // (Holding the same spot for the whole gesture keeps small errors from adding up.)
+      // Re-aiming at the centre undoes part of each turn, so settle it in a few passes.
+      const { anchor } = pinch;
+      for (let i = 0; anchor && i < 4; i++) {
+        const under = this.#pickVector(now.mid.x, now.mid.y);
+        if (!under || under.angleTo(anchor) < 1e-7) break;
+        this.camera.position.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(under, anchor));
+        this.camera.lookAt(0, 0, 0);
+        this.camera.updateMatrixWorld();
+      }
+      pinch = { ...now, anchor };
+      this.dirty = true;
+      this.#applyLod();
+    });
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
   }
 
   zoomBy(factor) {
@@ -479,6 +543,8 @@ export class Globe {
     const cam = this.camera;
     c.enableZoom = c.enablePan = c.zoomToCursor = tilted;
     c.screenSpacePanning = !tilted;
+    // Globe view: two fingers are handled by #bindPinch, so OrbitControls stays out of it.
+    c.touches = { ONE: THREE.TOUCH.ROTATE, TWO: tilted ? THREE.TOUCH.DOLLY_PAN : -1 };
     if (tilted) {
       Object.assign(c, { minDistance: 0.0025, maxDistance: 0.5, minPolarAngle: 0, maxPolarAngle: 1.48, rotateSpeed: 0.55, zoomSpeed: 2.2 });
       c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
@@ -961,6 +1027,17 @@ export class Globe {
   }
 
   pickNdc(x, y) {
+    const p = this.#hitNdc(x, y);
+    return p && toLatLon(p.x, p.y, p.z);
+  }
+
+  /** Point on the unit sphere under a client pixel, or null if off-globe. */
+  #pickVector(clientX, clientY) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    return this.#hitNdc(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  }
+
+  #hitNdc(x, y) {
     this.raycaster.setFromCamera({ x, y }, this.camera);
     const { origin: o, direction: d } = this.raycaster.ray;
     const b = o.dot(d);
@@ -969,7 +1046,7 @@ export class Globe {
     if (disc < 0) return null;
     const t = -b - Math.sqrt(disc);
     if (t < 0) return null;
-    return toLatLon(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t);
+    return new THREE.Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t).normalize();
   }
 
   /** Current camera altitude above the surface, in globe radii. */

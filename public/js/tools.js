@@ -74,6 +74,13 @@ export class MapTools {
     });
   }
 
+  /** A point sounding at a lat/lon (a long press on touch screens). */
+  soundingAt(ll) {
+    if (!this.enabled) return;
+    if (this.mode) this.setMode(null);
+    this.#point(ll);
+  }
+
   /** Start (or cancel, if it's the current one) a tool. */
   toggle(mode) {
     this.setMode(this.mode === mode ? null : mode);
