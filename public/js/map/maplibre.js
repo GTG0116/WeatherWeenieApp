@@ -12,6 +12,9 @@ const D2R = Math.PI / 180;
 const VIEW_K = 2 * Math.tan(16 * D2R) * 6371; // globe camera: km of ground per unit altitude (32° fov)
 const MAX_SIDE = 4096;
 const MAX_PIXELS = 9e6;
+// While exporting: the view only (no margin for panning), at up to this size.
+const EXPORT_MAX_SIDE = 8192;
+const EXPORT_MAX_PIXELS = 40e6;
 const MERC_MAX = 85.0511;
 
 const CARTO = (name) => `https://basemaps.cartocdn.com/gl/${name}-gl-style/style.json`;
@@ -222,6 +225,7 @@ export class MapLibreEngine {
       renderWorldCopies: true,
       fadeDuration: 150,
       canvasContextAttributes: { antialias: true }, // smoother border and alert lines
+      maxCanvasSize: [16384, 16384], // exports draw at 2-3x; the GPU's own limit still applies
     });
     if (!this.settings.rotate) this.map.touchZoomRotate.disableRotation();
     this.map.on('style.load', () => this.#onStyle());
@@ -541,10 +545,11 @@ export class MapLibreEngine {
     if (east - west > 240 || map.getPitch() > 45) return world;
     const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2));
     const lat = (y) => Math.atan(Math.sinh(y)) / D2R;
-    const padX = (east - west) * 0.4;
+    const pad = this.exportScale ? 0.03 : 0.4; // the view won't move while exporting
+    const padX = (east - west) * pad;
     const ys = merc(south);
     const yn = merc(north);
-    const padY = (yn - ys) * 0.4;
+    const padY = (yn - ys) * pad;
     west -= padX;
     east += padX;
     south = Math.max(-MERC_MAX, lat(ys - padY));
@@ -576,7 +581,9 @@ export class MapLibreEngine {
     const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2));
     let w = ((b.east - b.west) / 360) * world;
     let h = ((merc(b.north) - merc(b.south)) / (2 * Math.PI)) * world;
-    const scale = Math.min(1, MAX_SIDE / w, MAX_SIDE / h, Math.sqrt(MAX_PIXELS / (w * h)));
+    const maxSide = this.exportScale ? Math.min(EXPORT_MAX_SIDE, this.globe.renderer.capabilities.maxTextureSize || MAX_SIDE) : MAX_SIDE;
+    const maxPixels = this.exportScale ? EXPORT_MAX_PIXELS : MAX_PIXELS;
+    const scale = Math.min(1, maxSide / w, maxSide / h, Math.sqrt(maxPixels / (w * h)));
     w = Math.max(2, Math.round(w * scale));
     h = Math.max(2, Math.round(h * scale));
     if (w === h) w += 1; // see the constructor

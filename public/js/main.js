@@ -18,7 +18,7 @@ import { RadarSectionPanel } from './radar/xsect.js';
 import { COLOR_KEYS, LAYER_GROUPS, MAP_STYLES, MapLibreEngine, mapSettings } from './map/maplibre.js';
 import { AlertLayer, alertSettings } from './alerts.js';
 import { Broadcast, broadcastSettings } from './broadcast.js';
-import { frameSettings, frameSize, layoutFrame, renderFramePanel } from './frame.js';
+import { exportDetail, frameSettings, frameSize, layoutFrame, renderFramePanel } from './frame.js';
 import { Exporter } from './export.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -191,6 +191,7 @@ async function showFrame(i) {
 const exporter = new Exporter({
   globe,
   frameSize: () => frameSize(state.frame),
+  detail: () => exportDetail(state.frame),
   current: () => state.stepIndex,
   showFrame,
   broadcastOn: () => state.broadcast.on,

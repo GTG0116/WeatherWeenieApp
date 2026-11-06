@@ -15,7 +15,14 @@ export const FRAME_PRESETS = [
   { id: 'custom', name: 'Custom size' },
 ];
 
-export const DEFAULT_FRAME = { preset: 'full', w: 1080, h: 1080, outline: true };
+export const DEFAULT_FRAME = { preset: 'full', w: 1080, h: 1080, outline: true, res: 2 };
+
+/** Export detail: saved images and videos are this many times the picked size. */
+export const EXPORT_DETAIL = [1, 2, 3];
+
+export function exportDetail(s) {
+  return EXPORT_DETAIL.includes(Number(s.res)) ? Number(s.res) : DEFAULT_FRAME.res;
+}
 
 export function frameSettings(saved) {
   return { ...DEFAULT_FRAME, ...saved };
@@ -98,10 +105,18 @@ export function renderFramePanel(el, s, onChange) {
            <span>×</span><label>H <input type="number" min="100" max="8000" step="10" data-k="h" value="${s.h}" /></label></div>`
         : ''
     }
+    <div class="res-row frame-detail"><span>Export detail</span><div class="segmented" style="grid-template-columns:repeat(${EXPORT_DETAIL.length},1fr)">${EXPORT_DETAIL.map(
+      (d) => `<button data-res="${d}" class="${exportDetail(s) === d ? 'active' : ''}">${d}×</button>`,
+    ).join('')}</div></div>
+    <div class="hint-row">${
+      size
+        ? `Saved images are ${size.w * exportDetail(s)} × ${size.h * exportDetail(s)}${exportDetail(s) > 1 ? ` (${exportDetail(s)}× the ${size.w} × ${size.h} size) for sharper text and lines` : ''}.`
+        : `Saved images are ${exportDetail(s)}× the map at screen resolution.`
+    } Videos stay within what MP4 and GIF can hold.</div>
     <div class="toggle${s.outline ? ' on' : ''}" data-act="outline"><span>Frame outline &amp; size label</span><span class="switch"></span></div>
     <div class="hint-row">${
       size
-        ? 'Only the map and what is drawn on it change size: the panels stay put. The camera and video buttons save at exactly this size.'
+        ? 'Only the map and what is drawn on it change size: the panels stay put. The camera and video buttons save at this shape.'
         : 'Pick a size to frame the map for a social media post. Saved images and videos use it.'
     }</div>`;
   el.querySelectorAll('.frame-preset').forEach((b) =>
@@ -115,6 +130,13 @@ export function renderFramePanel(el, s, onChange) {
     inp.addEventListener('change', () => {
       s[inp.dataset.k] = Math.max(100, Math.min(8000, Number(inp.value) || 1080));
       onChange();
+    }),
+  );
+  el.querySelectorAll('[data-res]').forEach((b) =>
+    b.addEventListener('click', () => {
+      s.res = Number(b.dataset.res);
+      onChange();
+      renderFramePanel(el, s, onChange);
     }),
   );
   el.querySelector('[data-act="outline"]').addEventListener('click', () => {
