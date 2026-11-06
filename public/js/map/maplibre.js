@@ -152,12 +152,31 @@ function linesToGeoJSON(buf) {
   return { type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines } };
 }
 
-// App line layers drawn over the data: [layer name, file, min zoom]
+// App line layers drawn over the data, bottom to top. width: [zoom, px] stops;
+// casing: a contrasting halo under the line so it reads over any data colour;
+// boost: opacity multiplier on the globe's line theme; plainOnly: only drawn on
+// styles without their own coastlines.
 const APP_LINES = [
-  ['counties', 'counties-500k', 5],
-  ['states', 'states-hi', 2],
-  ['borders', 'borders-10m', 0],
+  { name: 'lakes', file: 'lakes-10m', minzoom: 0, width: [0, 0.6, 6, 1.1, 10, 1.6], boost: 1.2, plainOnly: true },
+  { name: 'coast', file: 'coastline-10m', minzoom: 0, width: [0, 0.8, 6, 1.4, 10, 2], boost: 1.2, plainOnly: true },
+  { name: 'counties', file: 'counties-500k', minzoom: 5, width: [5, 0.45, 8, 0.9, 11, 1.4], boost: 1.6 },
+  { name: 'states', file: 'states-hi', minzoom: 2, width: [2, 0.45, 4, 0.65, 6, 1.1, 8, 1.7, 12, 2.4], casing: 1.2, boost: 1.4 },
+  { name: 'borders', file: 'borders-10m', minzoom: 0, width: [0, 1, 3, 1.7, 6, 2.5, 9, 3.2, 12, 4], casing: 2.4, boost: 2 },
 ];
+const BOUNDARY_LINES = new Set(['counties', 'states', 'borders']);
+
+/** [zoom, px] stops to a zoom-interpolated line width, plus `extra` px. */
+const widthExpr = (stops, extra = 0) => ['interpolate', ['exponential', 1.4], ['zoom'], ...stops.map((v, i) => (i % 2 ? v + extra : v))];
+
+const hexColor = (c) => (typeof c === 'number' ? `#${c.toString(16).padStart(6, '0')}` : c);
+
+/** Black or white, whichever stands out against a line colour. */
+function haloFor(color) {
+  const n = parseInt(String(hexColor(color)).replace('#', '').slice(0, 6), 16);
+  if (!Number.isFinite(n)) return '#000000';
+  const lum = 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
+  return lum > 50 ? '#000000' : '#ffffff'; // only near-black lines get a light halo
+}
 
 export class MapLibreEngine {
   /**
@@ -202,6 +221,7 @@ export class MapLibreEngine {
       maxPitch: 70,
       renderWorldCopies: true,
       fadeDuration: 150,
+      canvasContextAttributes: { antialias: true }, // smoother border and alert lines
     });
     if (!this.settings.rotate) this.map.touchZoomRotate.disableRotation();
     this.map.on('style.load', () => this.#onStyle());
@@ -241,12 +261,14 @@ export class MapLibreEngine {
   }
 
   #onStyle() {
+    this.styleGen = (this.styleGen ?? 0) + 1;
     const proj = this.settings.projection === 'mercator' ? 'mercator' : 'globe';
     try {
       this.map.setProjection({ type: proj });
     } catch {
       // older style spec: stays in Mercator
     }
+    this.#setSky();
     this.#addHillshade();
     this.#addData();
     this.#addLines();
@@ -270,6 +292,23 @@ export class MapLibreEngine {
   /** The layer just above the data where overlays (lines, alerts) go. */
   overlayBeforeId() {
     return this.beforeId(this.settings.dataPlacement === 'top' ? 'top' : 'below-labels');
+  }
+
+  /** A soft atmosphere around the globe, fading out as you zoom in. */
+  #setSky() {
+    try {
+      this.map.setSky({
+        'sky-color': '#0b1018',
+        'horizon-color': '#2a4466',
+        'fog-color': '#0b1018',
+        'sky-horizon-blend': 0.5,
+        'horizon-fog-blend': 0.6,
+        'fog-ground-blend': 1,
+        'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.9, 4, 0.7, 7, 0],
+      });
+    } catch {
+      // no sky support
+    }
   }
 
   #addHillshade() {
@@ -331,39 +370,84 @@ export class MapLibreEngine {
     for (const l of this.map.getStyle().layers) if (l.id.startsWith('app-') && l.id !== 'app-hillshade') this.map.moveLayer(l.id, before);
   }
 
+  /** Base styles with no water layers of their own get the app's coastlines. */
+  #isPlain() {
+    return !this.map.getStyle().layers.some((l) => groupOf(l) === 'water');
+  }
+
   async #addLines() {
-    for (const [name, file, minzoom] of APP_LINES) {
+    const map = this.map;
+    const gen = this.styleGen;
+    const plain = this.#isPlain();
+    for (const def of APP_LINES) {
+      const { name, file, minzoom } = def;
+      if (def.plainOnly && !plain) continue;
       const id = `app-line-${name}`;
-      if (!this.lineData[name]) {
-        this.lineData[name] = fetch(`data/geo/${file}.bin`)
-          .then((r) => r.arrayBuffer())
-          .then(linesToGeoJSON);
-      }
+      this.lineData[name] ??= fetch(`data/geo/${file}.bin`)
+        .then((r) => r.arrayBuffer())
+        .then(linesToGeoJSON);
       const data = await this.lineData[name];
-      if (!this.map || this.map.getLayer(id)) continue;
-      if (!this.map.getSource(id)) this.map.addSource(id, { type: 'geojson', data, tolerance: 0.6 });
-      this.map.addLayer(
-        { id, type: 'line', source: id, minzoom, layout: { 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': name === 'counties' ? 0.6 : 1, 'line-opacity': 0.5 } },
+      // The style may have changed while the file loaded; that load adds its own.
+      if (this.map !== map || this.styleGen !== gen || map.getLayer(id)) continue;
+      if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data, tolerance: 0.3 });
+      const layout = { 'line-join': 'round', 'line-cap': 'round' };
+      if (def.casing) {
+        map.addLayer(
+          {
+            id: `${id}-case`,
+            type: 'line',
+            source: id,
+            minzoom,
+            layout,
+            paint: { 'line-color': '#000000', 'line-width': widthExpr(def.width, def.casing), 'line-opacity': 0.4, 'line-blur': 0.6 },
+          },
+          this.overlayBeforeId(),
+        );
+      }
+      map.addLayer(
+        { id, type: 'line', source: id, minzoom, layout, paint: { 'line-color': '#ffffff', 'line-width': widthExpr(def.width), 'line-opacity': 0.8 } },
         this.overlayBeforeId(),
       );
       this.#styleLine(name);
     }
+    this.applyTweaks(); // base map boundaries give way to these
   }
 
   /** Line colours follow the globe's line theme (Globe.setLineStyle). */
   lineStyle(name, style) {
     this.lineStyles[name] = { ...this.lineStyles[name], ...style };
     this.#styleLine(name);
+    if (name === 'borders' && style.visible !== undefined) this.applyTweaks();
+  }
+
+  /** The app's country/state lines are showing (so the base map's own are hidden). */
+  #appBorders() {
+    return this.settings.layers.boundaries !== false && this.lineStyles.borders?.visible !== false && !!this.map?.getLayer('app-line-borders');
   }
 
   #styleLine(name) {
+    const map = this.map;
     const id = `app-line-${name}`;
     const st = this.lineStyles[name];
-    if (!st || !this.map?.getLayer(id)) return;
-    const hex = (c) => (typeof c === 'number' ? `#${c.toString(16).padStart(6, '0')}` : c);
-    if (st.color !== undefined) this.map.setPaintProperty(id, 'line-color', hex(st.color));
-    if (st.opacity !== undefined) this.map.setPaintProperty(id, 'line-opacity', Math.min(1, st.opacity * 1.25));
-    if (st.visible !== undefined) this.map.setLayoutProperty(id, 'visibility', st.visible ? 'visible' : 'none');
+    const def = APP_LINES.find((d) => d.name === name);
+    if (!st || !def || !map?.getLayer(id)) return;
+    const boundary = BOUNDARY_LINES.has(name);
+    // Boundary lines are part of the map's Boundaries group: its switch and colour apply.
+    const color = (boundary && this.settings.colors.boundaries) || (st.color !== undefined ? hexColor(st.color) : null);
+    const visible = st.visible !== false && (!boundary || this.settings.layers.boundaries !== false);
+    const caseId = `${id}-case`;
+    const hasCase = !!map.getLayer(caseId);
+    if (color) {
+      map.setPaintProperty(id, 'line-color', color);
+      if (hasCase) map.setPaintProperty(caseId, 'line-color', haloFor(color));
+    }
+    if (st.opacity !== undefined) {
+      const op = Math.min(1, st.opacity * def.boost);
+      map.setPaintProperty(id, 'line-opacity', op);
+      if (hasCase) map.setPaintProperty(caseId, 'line-opacity', (color && haloFor(color) === '#ffffff' ? 0.3 : 0.5) * op);
+    }
+    map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+    if (hasCase) map.setLayoutProperty(caseId, 'visibility', visible ? 'visible' : 'none');
   }
 
   /** Layer group visibility, colour overrides, label size, data opacity. */
@@ -372,6 +456,7 @@ export class MapLibreEngine {
     // Not isStyleLoaded(): that stays false while tiles load, right when the style arrives.
     if (!map?.style?._loaded) return;
     const s = this.settings;
+    const appBorders = this.#appBorders();
     for (const layer of map.getStyle().layers) {
       if (layer.id.startsWith('app-') || layer.id === 'wx-data') continue;
       const g = groupOf(layer);
@@ -380,7 +465,11 @@ export class MapLibreEngine {
         continue;
       }
       if (g === 'labels') map.setLayoutProperty(layer.id, 'visibility', 'none');
-      else if (g && s.layers[g] !== undefined) map.setLayoutProperty(layer.id, 'visibility', s.layers[g] ? 'visible' : 'none');
+      else if (g === 'boundaries' && appBorders && !/county|municipal|district/.test(layer.id)) {
+        // The app's crisper country and state lines replace the tiles' own
+        // (generalised, often dashed) ones rather than doubling them up.
+        map.setLayoutProperty(layer.id, 'visibility', 'none');
+      } else if (g && s.layers[g] !== undefined) map.setLayoutProperty(layer.id, 'visibility', s.layers[g] ? 'visible' : 'none');
       const color = s.colors[g];
       if (color) {
         if (layer.type === 'fill') map.setPaintProperty(layer.id, 'fill-color', color);
@@ -394,6 +483,7 @@ export class MapLibreEngine {
         if (layer.type === 'fill' && /^(land|earth)/.test(layer.id)) map.setPaintProperty(layer.id, 'fill-color', s.colors.background);
       }
     }
+    for (const def of APP_LINES) this.#styleLine(def.name);
     if (map.getLayer('wx-data')) map.setPaintProperty('wx-data', 'raster-opacity', s.dataOpacity);
     if (map.getLayer('app-hillshade')) map.setPaintProperty('app-hillshade', 'hillshade-exaggeration', s.hillshadeStrength);
   }
