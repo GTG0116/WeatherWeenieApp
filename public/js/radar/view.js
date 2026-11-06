@@ -3,7 +3,7 @@
 // markers on the globe, and the loop of recent frames for the selected site,
 // product and tilt.
 import { NOMINAL_TILTS, RADAR_GROUPS, RADAR_PRODUCTS, hasCustomColormap, hasLegacy, radarProductById, sourceOf, tiltCount } from './products.js';
-import { sampleNearest } from '../data.js';
+import { sampleCategory } from '../data.js';
 import { legacySweep } from './legacy.js';
 import { RadarSource, STALE_MS, ago, fetchStatus, listFrames, loadSites } from './source.js';
 import { colorTableName, resetColorTable, restoreColorTables, saveColorTable } from './colortables.js';
@@ -526,7 +526,7 @@ export class RadarView {
     const row = s.azLut[Math.min(3599, Math.floor(az * 10))];
     const value = inRange && row >= 0 ? s.values[row * s.nGates + g] : NaN;
     const tg = this.typeGrid;
-    const type = tg ? sampleNearest(tg.types, tg.meta, lat, lon) : undefined;
+    const type = tg ? sampleCategory(tg.types, tg.meta, lat, lon) : undefined;
     return { km, az, value, inRange, type: tg ? (Number.isFinite(type) ? type : tg.outside) : undefined };
   }
 }

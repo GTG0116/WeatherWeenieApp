@@ -1,7 +1,7 @@
 import { Globe } from './globe/globe.js';
 import { WindParticles } from './globe/particles.js';
 import { LabelLayer, contourLabelCandidates } from './globe/labels.js';
-import { DataSource, sampleField, sampleNearest } from './data.js';
+import { DataSource, sampleCategory, sampleField } from './data.js';
 import { Accumulator, KINDS } from './accum.js';
 import { PRODUCTS, PTYPE_CATEGORY, PTYPE_NAMES, accumulationOf, isobarContour, productAvailable, productById } from './products.js';
 import { PRECIP_TYPES } from './colormaps.js';
@@ -1409,7 +1409,7 @@ function updateCityValues() {
   labels.setValueFn((lat, lon) => {
     const v = cur.sample ? cur.sample(lat, lon) : sampleField(cur.field, cur.meta, lat, lon);
     if (!Number.isFinite(v) || (p.cityMin !== undefined && v < p.cityMin) || (p.cityMax !== undefined && v > p.cityMax)) return null;
-    const row = cur.types ? sampleNearest(cur.types, cur.meta, lat, lon) : 0;
+    const row = cur.types ? sampleCategory(cur.types, cur.meta, lat, lon) : 0;
     return { text: p.format(u.f(v), state.units), ...valueColor(p, cur.option, v, row) };
   });
 }
@@ -1597,7 +1597,7 @@ function refreshTooltip() {
   let row = 0;
   let extra = '';
   if (cur.types) {
-    row = sampleNearest(cur.types, cur.meta, ll.lat, ll.lon);
+    row = sampleCategory(cur.types, cur.meta, ll.lat, ll.lon);
     extra = v >= 0.05 ? PTYPE_NAMES[row] ?? '' : 'No precipitation';
   }
   if (cur.contour) {
