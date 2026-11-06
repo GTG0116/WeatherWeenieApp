@@ -3,7 +3,7 @@
 // vorticity 1e-5 s⁻¹, CAPE/CIN J/kg, lapse rate °C/km, height above ground m,
 // helicity m²/s², lightning flashes km⁻² (5 min)⁻¹, precip rate mm/h, cloud %, pressure hPa,
 // snow/sleet depth cm, ice and precipitation (liquid equivalent) mm,
-// reflectivity dBZ; radar: radial velocity / spectrum width m/s, ZDR dB, KDP °/km,
+// reflectivity dBZ, visibility m, probability %; radar: radial velocity / spectrum width m/s, ZDR dB, KDP °/km,
 // echo tops km, VIL kg/m².
 
 const KINDS = {
@@ -61,6 +61,10 @@ const KINDS = {
   },
   vil: { any: { label: 'kg/m²', f: (v) => v, inv: (v) => v } },
   percent: { any: { label: '%', f: (v) => v, inv: (v) => v } },
+  vis: {
+    imperial: { label: 'mi', f: (v) => v / 1609.344, inv: (v) => v * 1609.344 },
+    metric: { label: 'km', f: (v) => v / 1000, inv: (v) => v * 1000 },
+  },
   pressure: { any: { label: 'hPa', f: (v) => v, inv: (v) => v } },
 };
 

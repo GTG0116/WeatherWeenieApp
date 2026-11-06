@@ -57,6 +57,7 @@ async function gribJob(job) {
   const t0 = performance.now();
   const need = pointsFor(job.extract, job.regrid);
   let fields = job.member != null ? [pickMember(raw[0], job.member, need)] : raw.filter(Boolean).map((b) => decodeOne(b, need));
+  if (job.polar) fields = polarToUV(fields[0], fields[1], job.isU);
   let windowed = false;
   if (fields[0].meta.projection) {
     if (!job.regrid) throw new Error('Projected grid without regrid settings');
@@ -76,6 +77,32 @@ async function gribJob(job) {
     bytes: fetched.reduce((n, b) => n + (b ? b.byteLength : 0), 0),
     decodeMs: performance.now() - t0,
   };
+}
+
+/** A whole file's bytes, for the main thread to share between jobs (GEPS: one file, every member). */
+async function fetchJob(job) {
+  const buf = await fetchBytes([job.url], job.range, job.signal);
+  return { fields: [], parts: [buf], bytes: buf.byteLength, decodeMs: 0 };
+}
+
+/**
+ * Wind speed and direction (degrees it blows from) → [requested component, other],
+ * on the native grid, so regridding interpolates components, never angles.
+ */
+function polarToUV(speed, dir, isU) {
+  const s = speed.values;
+  const d = dir.values;
+  const u = new Float32Array(s.length);
+  const v = new Float32Array(s.length);
+  const k = Math.PI / 180;
+  for (let i = 0; i < s.length; i++) {
+    const a = d[i] * k;
+    u[i] = -s[i] * Math.sin(a);
+    v[i] = -s[i] * Math.cos(a);
+  }
+  const uf = { values: u, meta: { ...speed.meta, number: 2 } };
+  const vf = { values: v, meta: { ...speed.meta, number: 3 } };
+  return isU ? [uf, vf] : [vf, uf];
 }
 
 /** The messages of a file of all ensemble members, as separate buffers to decode in parallel. */
@@ -241,7 +268,7 @@ async function omJob({ url, variable, signal }) {
   return { fields: [{ values, meta }], bytes: values.byteLength, decodeMs: performance.now() - t0 };
 }
 
-const JOBS = { om: omJob, compute: computeJob, split: splitJob, sum: sumJob, grib: gribJob };
+const JOBS = { om: omJob, compute: computeJob, fetch: fetchJob, split: splitJob, sum: sumJob, grib: gribJob };
 
 // Downloads of jobs still running, so the main thread can cancel them (the view changed).
 const controllers = new Map();

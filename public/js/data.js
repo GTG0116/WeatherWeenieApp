@@ -1,7 +1,8 @@
 // Field loading: a pool of decode workers plus an LRU cache of decoded fields.
 // Run arguments are "run keys": a run id, plus "~member" for an ensemble member
 // ("2026110200~mean", "2026110200~7"), so every member gets its own cache entries.
-import { MODELS, modelFor } from './models.js';
+import { MODELS, ensembleMembers, modelFor, recipeFor, supports } from './models.js';
+import { parseProb, passes } from './probability.js';
 import { extractWindow } from './decode/window.js';
 
 // Decoded fields kept in memory: enough for whole-run loops where the device allows.
@@ -12,6 +13,11 @@ const MIN_ENTRIES = 12; // never evict below this many, whatever their size
 // somewhere else in the same field only needs decoding again, not downloading.
 const MAX_RAW_BYTES = Math.min(512 * 2 ** 20, MAX_BYTES / 4);
 const MEAN_BATCH = 5; // ensemble members fetched and summed per worker job
+const PROB_BATCH = 8; // ensemble members loaded at once for a probability
+// Totals built up bucket by bucket (GEFS precipitation, snow) are where a member's
+// next hours start from: kept this many hours either side of a probability's hour.
+const CHAIN_PARAMS = new Set(['tp', 'sf', 'sfb']);
+const CHAIN_HOURS = 36;
 // Queue priority: interactive (sounding/cross-section) loads first, then the
 // forecast hour on screen, then background preloading.
 export const PRIORITY = { background: 0, interactive: 1 };
@@ -32,30 +38,86 @@ export const splitRun = (run) => {
 };
 
 // Cached fields are stored as 16-bit integers over the field's own range, which
-// halves memory (≈1/65 000 of the range, e.g. 2 cm for 500 hPa heights). 65535 is NaN.
+// halves memory (≈1/65 000 of the range, e.g. 2 cm for 500 hPa heights); fields of
+// whole numbers 0–254 (precip type) or of one step (probabilities: 100/members %)
+// take 8 bits. Only the run of each row that has data is kept, so the corners of a
+// regional grid outside its domain cost nothing. The top code (65535 / 255) is NaN.
 const NAN16 = 65535;
+const NAN8 = 255;
 
 function pack(field) {
   const v = field.values;
+  const { ni, nj } = field.meta;
   let lo = Infinity;
   let hi = -Infinity;
+  let whole = true; // every value a whole number (or NaN)
   for (let i = 0; i < v.length; i++) {
     const x = v[i];
     if (x < lo) lo = x;
     if (x > hi) hi = x;
+    if (whole && x === x && x !== Math.round(x)) whole = false;
   }
   if (!(hi >= lo)) lo = hi = 0;
-  const k = hi > lo ? 65534 / (hi - lo) : 0;
-  const q = new Uint16Array(v.length);
-  for (let i = 0; i < v.length; i++) q[i] = v[i] === v[i] ? Math.round((v[i] - lo) * k) : NAN16;
-  return { q, lo, step: k ? 1 / k : 0, meta: field.meta, derived: field.derived };
+  // Rows: [first, count] of each row's span of data (rows of NaN keep none).
+  let spans = null;
+  let n = v.length;
+  if (ni * nj === v.length) {
+    spans = new Int32Array(nj * 2);
+    n = 0;
+    for (let j = 0; j < nj; j++) {
+      const r = j * ni;
+      let a = 0;
+      let b = ni - 1;
+      while (a < ni && v[r + a] !== v[r + a]) a++;
+      while (b >= a && v[r + b] !== v[r + b]) b--;
+      spans[j * 2] = a;
+      spans[j * 2 + 1] = b - a + 1;
+      n += b - a + 1;
+    }
+    if (n > v.length * 0.95) spans = null; // not worth it (global grids)
+  }
+  let q;
+  let step;
+  const quantum = field.quantum;
+  if (quantum || (whole && lo >= 0 && hi <= 254)) {
+    step = quantum || 1;
+    lo = 0;
+  } else step = hi > lo ? (hi - lo) / 65534 : 0;
+  const k = step ? 1 / step : 0;
+  const bytes = quantum || (whole && lo >= 0 && hi <= 254) ? 1 : 2;
+  q = bytes === 1 ? new Uint8Array(spans ? n : v.length) : new Uint16Array(spans ? n : v.length);
+  const nan = bytes === 1 ? NAN8 : NAN16;
+  const put = (o, i) => {
+    const x = v[i];
+    q[o] = x === x ? Math.round((x - lo) * k) : nan;
+  };
+  if (spans) {
+    let o = 0;
+    for (let j = 0; j < nj; j++) {
+      const r = j * ni + spans[j * 2];
+      for (let c = 0; c < spans[j * 2 + 1]; c++) put(o++, r + c);
+    }
+  } else for (let i = 0; i < v.length; i++) put(i, i);
+  return { q, lo, step, spans, length: v.length, meta: field.meta, derived: field.derived };
 }
 
-function unpack({ q, lo, step, meta, derived }) {
-  const values = new Float32Array(q.length);
-  for (let i = 0; i < q.length; i++) values[i] = q[i] === NAN16 ? NaN : lo + q[i] * step;
+function unpack({ q, lo, step, spans, length, meta, derived }) {
+  const nan = q instanceof Uint8Array ? NAN8 : NAN16;
+  const values = new Float32Array(length ?? q.length);
+  if (spans) {
+    values.fill(NaN);
+    const { ni, nj } = meta;
+    let o = 0;
+    for (let j = 0; j < nj; j++) {
+      const r = j * ni + spans[j * 2];
+      const c = spans[j * 2 + 1];
+      for (let i = 0; i < c; i++, o++) values[r + i] = q[o] === nan ? NaN : lo + q[o] * step;
+    }
+  } else for (let i = 0; i < q.length; i++) values[i] = q[i] === nan ? NaN : lo + q[i] * step;
   return { values, meta, derived };
 }
+
+const packedBytes = (p) => p.q.byteLength + (p.spans ? p.spans.byteLength : 0);
 
 export class DataSource {
   constructor() {
@@ -77,6 +139,13 @@ export class DataSource {
     this.raw = new Map(); // "url#range" -> Uint8Array of GRIB bytes (see MAX_RAW_BYTES)
     this.rawBytes = 0;
     this.means = new MeanStore();
+    this.shared = new Map(); // url -> Promise<Uint8Array>: GEPS files, which hold every member
+    // Fields read only to compute another one: decoded once, shared by whoever asks
+    // while they load, and never cached or packed (see #inputsFor).
+    this.transient = new Map(); // key -> Promise<field>
+    this.pairJobs = new Map(); // "…/u+v/level" -> Promise<{u, v}> (see #raw)
+    this.viewDirect = new Set(); // "param/level" the view on screen reads itself (see retain)
+    this.onProgress = null; // ({model, run, step, done, total}) while a probability counts members
     this.stats = { bytes: 0, decodeMs: 0, fields: 0 };
     this.viewSig = null; // what retain() last kept (see there)
     this.rawPrefix = null;
@@ -156,12 +225,11 @@ export class DataSource {
   // ------------------------------------------------------------- the view on screen
   /** Every param/level a set of input specs reads, with recipes expanded into what they're made from. */
   #closure(model, member, specs, out = new Set()) {
-    const m = modelFor(model, member);
     for (const { param, level } of specs) {
       const k = `${param}/${level ?? 'sfc'}`;
       if (out.has(k)) continue;
       out.add(k);
-      const recipe = m.derived[param];
+      const recipe = recipeFor(model, param, level, member);
       if (recipe?.sum) out.add(`${recipe.sum}/sfc`);
       else if (recipe) {
         // Some recipes read other fields depending on the hour (precip buckets): ask at a few.
@@ -182,6 +250,7 @@ export class DataSource {
   retain(view) {
     const sig = view ? `${view.model}/${view.run}|${view.specs.map((s) => `${s.param}/${s.level ?? 'sfc'}`).sort().join(',')}` : '';
     if (sig === this.viewSig) return;
+    this.viewDirect = new Set(view ? view.specs.map((s) => `${s.param}/${s.level ?? 'sfc'}`) : []);
     this.viewSig = sig;
     const prefix = view ? `${view.model}/${view.run}/` : null;
     const keep = view ? this.#closure(view.model, splitRun(view.run)[1], view.specs) : new Set();
@@ -193,6 +262,10 @@ export class DataSource {
       if (this.resolved.delete(key)) this.bytes -= e.bytes;
     }
     for (const k of this.windows.keys()) if (!prefix || !k.startsWith(prefix)) this.windows.delete(k);
+    // Shared downloads about to be cancelled below mustn't be joined by the new view.
+    for (const k of this.transient.keys()) if (!kept(k)) this.transient.delete(k);
+    this.pairJobs.clear();
+    this.shared.clear();
     if (prefix !== this.rawPrefix) {
       this.raw.clear();
       this.rawBytes = 0;
@@ -303,7 +376,7 @@ export class DataSource {
         if (f?.values) {
           entry.packed = pack(f);
           entry.p = null;
-          entry.bytes = entry.packed.q.byteLength;
+          entry.bytes = packedBytes(entry.packed);
         }
         this.bytes += entry.bytes;
         this.resolved.add(key);
@@ -342,19 +415,52 @@ export class DataSource {
   #ctx(model, run, step) {
     const steps = this.runSteps.get(`${model}/${splitRun(run)[0]}`) ?? [];
     const before = steps.filter((s) => s < step);
-    return { step, prevStep: before.length ? before[before.length - 1] : Math.max(0, step - 1) };
+    const hour = Number(splitRun(run)[0].slice(8, 10)); // the run's cycle (UTC)
+    return { step, prevStep: before.length ? before[before.length - 1] : Math.max(0, step - 1), hour };
   }
 
   /**
    * Decode one published field, uncached. Grid-relative winds also return their partner.
    * With a box, only that window of the field comes back (see fieldIn).
    */
-  async #raw(model, run, step, param, level, box = null, priority = box ? PRIORITY.interactive : PRIORITY.background) {
+  async #raw(model, run, step, param, level, box = null, priority = box ? PRIORITY.interactive : PRIORITY.background, keepPair = true) {
     const [runId, member] = splitRun(run);
     const src = modelFor(model, member).source;
+    // Fields decoded in pairs (grid-relative u/v, NBM's speed/direction → u/v): one
+    // job serves both, however many ask for either while it runs.
+    const partner = !box && src.pairOf?.(param);
+    if (partner) {
+      const pk = `${model}/${run}/${step}/${[param, partner].sort().join('+')}/${level ?? 'sfc'}`;
+      let p = this.pairJobs.get(pk);
+      if (!p) {
+        p = this.#rawJob(src, model, run, step, param, level, null, priority).then((fields) => ({ [param]: fields[0], [partner]: fields[1] }));
+        this.pairJobs.set(pk, p);
+        p.then(
+          () => this.pairJobs.delete(pk),
+          () => this.pairJobs.delete(pk),
+        );
+      }
+      const both = await p;
+      if (keepPair && both[partner]) this.#put(`${model}/${run}/${step}/${partner}/${level ?? 'sfc'}`, both[partner]);
+      return both[param];
+    }
+    const fields = await this.#rawJob(src, model, run, step, param, level, box, priority);
+    if (fields.pair && fields[1] && keepPair) {
+      const pairKey = `${model}/${run}/${step}/${fields.pair}/${level ?? 'sfc'}`;
+      if (box) this.#putWindow(`${pairKey}@${boxKey(box)}`, Promise.resolve(fields[1]));
+      else this.#put(pairKey, fields[1]);
+    }
+    return fields[0];
+  }
+
+  /** Decode one published field (and its pair, if it comes with one), post-processed. */
+  async #rawJob(src, model, run, step, param, level, box, priority) {
+    const [runId, member] = splitRun(run);
     const job = await src.job(runId, step, param, level, member);
     job.priority = priority;
     job.key = `${model}/${run}/${step}/${param}/${level ?? 'sfc'}`; // what retain() checks
+    // A single member of a file of all members (GEPS): download the file once for every member.
+    if (src.allMembers && job.member != null && job.member !== 'mean' && !box) job.bytes = await this.#sharedBytes(job, step);
     if (box) {
       job.extract = box;
       job.parts?.forEach((p) => (p.extract = box));
@@ -375,12 +481,19 @@ export class DataSource {
       src.post(p)?.(f.values, f.meta);
       normalizeUnits(f, p);
     });
-    if (job.pair && fields[1]) {
-      const pairKey = `${model}/${run}/${step}/${job.pair.param}/${level ?? 'sfc'}`;
-      if (box) this.#putWindow(`${pairKey}@${boxKey(box)}`, Promise.resolve(fields[1]));
-      else this.#put(pairKey, fields[1]);
+    fields.pair = job.pair?.param ?? null;
+    return fields;
+  }
+
+  #sharedBytes(job, step) {
+    let p = this.shared.get(job.url);
+    if (!p) {
+      p = this.#decode({ kind: 'fetch', url: job.url, range: job.range, priority: job.priority, key: job.key }, step).then((parts) => parts[0]);
+      this.shared.set(job.url, p);
+      p.catch(() => this.shared.delete(job.url));
+      while (this.shared.size > 8) this.shared.delete(this.shared.keys().next().value);
     }
-    return fields[0];
+    return p;
   }
 
   #putWindow(k, p) {
@@ -407,7 +520,7 @@ export class DataSource {
       return hit;
     }
     const m = modelFor(model, splitRun(run)[1]);
-    const recipe = m.derived[param];
+    const recipe = recipeFor(model, param, level, splitRun(run)[1]);
     const make = async () => {
       if (this.resolved.has(key)) return extractWindow(await this.#value(this.cache.get(key)), box);
       if (recipe && !recipe.sum && !recipe.worker) {
@@ -450,8 +563,10 @@ export class DataSource {
     step += stepOffset;
     if (step < 0) return Promise.resolve(null);
     const key = `${model}/${run}/${step}/${param}/${level ?? 'sfc'}`;
+    const prob = parseProb(param);
+    if (prob) return this.#remember(key, () => this.#probability(model, run, step, prob));
     const m = modelFor(model, splitRun(run)[1]);
-    const recipe = m.derived[param];
+    const recipe = recipeFor(model, param, level, splitRun(run)[1]);
     if (step === 0 && (recipe ? recipe.zeroAtStart : m.source.zeroAtStart(param))) {
       // Accumulations start at zero; F000 files don't carry them (REFS has no F000 at all).
       return this.#remember(key, async () => {
@@ -465,7 +580,7 @@ export class DataSource {
       return this.#remember(key, async () => {
         const ctx = { ...this.#ctx(model, run, step), level };
         const spec = recipe.needs(level, ctx);
-        const inp = await this.inputs(model, run, step, spec);
+        const inp = await this.#inputsFor(model, run, step, spec, param);
         const base = Object.values(inp).find(Boolean);
         if (!recipe.worker) return { values: recipe.make(inp, ctx), meta: base.meta, derived: true };
         // Per-point profile calculations run in a worker; their many inputs aren't kept.
@@ -480,6 +595,97 @@ export class DataSource {
     }
     if (this.#computedMean(model, run)) return this.#storedMean(key, model, run, step, param, level);
     return this.#remember(key, () => this.#raw(model, run, step, param, level));
+  }
+
+  /**
+   * An ensemble probability (%): the share of members whose value passes the
+   * threshold (see probability.js). Each member's inputs are loaded like that
+   * member's own fields, so recipes work as they do for single members; they're
+   * counted batch by batch and dropped again. For the hour on screen every
+   * threshold of the kind is counted in the same pass, so switching thresholds
+   * there costs nothing. Finished probabilities are kept across visits, like means.
+   */
+  async #probability(model, run, step, prob) {
+    const [runId] = splitRun(run);
+    const option = `${prob.op}${prob.threshold}`;
+    const storeKey = `${model}/${runId}/${step}/prob:${prob.id}:${option}`;
+    const stored = await this.means.get(storeKey);
+    if (stored) return unpack(stored);
+    const members = ensembleMembers(model);
+    const spec = prob.kind.inputs((p, l) => supports(model, p, l, members[0]));
+    const options = step === this.focusStep && prob.kind.thresholds.includes(option) ? prob.kind.thresholds : [option];
+    const tests = options.map((o) => {
+      const q = parseProb(`prob:${prob.id}:${o}`);
+      return passes(q.op, q.threshold);
+    });
+    let counts = null;
+    let missing = null; // outside a regional grid
+    let meta = null;
+    let done = 0;
+    const failed = [];
+    try {
+      for (let i = 0; i < members.length; i += PROB_BATCH) {
+        await Promise.all(
+          members.slice(i, i + PROB_BATCH).map(async (m) => {
+            let inp;
+            try {
+              inp = await this.#inputsFor(model, `${runId}~${m}`, step, spec, null);
+            } catch (err) {
+              if (err.message === CANCELLED) throw err;
+              failed.push(err);
+              return;
+            }
+            const v = prob.kind.value(inp);
+            if (!counts) {
+              counts = tests.map(() => new Uint8Array(v.length));
+              missing = new Uint8Array(v.length);
+              meta = Object.values(inp).find(Boolean).meta;
+            }
+            for (let k = 0; k < v.length; k++) if (v[k] !== v[k]) missing[k] = 1;
+            tests.forEach((test, t) => {
+              const c = counts[t];
+              for (let k = 0; k < v.length; k++) if (test(v[k])) c[k]++;
+            });
+            done++;
+            this.onProgress?.({ model, run, step, done, total: members.length });
+          }),
+        );
+        this.#sweepMembers(model, runId, step);
+      }
+    } finally {
+      this.#sweepMembers(model, runId, step);
+    }
+    // A member or two missing still makes a fair probability; more doesn't.
+    if (!done || failed.length > members.length / 4) throw failed[0] ?? new Error('no ensemble members');
+    const fields = counts.map((c) => {
+      const values = new Float32Array(c.length);
+      for (let k = 0; k < c.length; k++) values[k] = missing[k] ? NaN : (c[k] * 100) / done;
+      return { values, meta, derived: true, members: done, quantum: 100 / done }; // stored as 8-bit counts
+    });
+    options.forEach((o, t) => {
+      if (o !== option) this.#put(`${model}/${run}/${step}/prob:${prob.id}:${o}/sfc`, fields[t]);
+    });
+    const field = fields[options.indexOf(option)];
+    if (!failed.length) this.means.put(storeKey, pack(field));
+    return field;
+  }
+
+  /**
+   * Drop the single-member fields a probability loaded (every member run of this
+   * run), except bucket-built totals near its hour, which later hours build on.
+   */
+  #sweepMembers(model, runId, step) {
+    const prefix = `${model}/${runId}~`;
+    for (const [key, e] of this.cache) {
+      if (!key.startsWith(prefix) || !this.resolved.has(key)) continue;
+      const [, run, s, param] = key.split('/');
+      if (param.startsWith('prob:')) continue;
+      const member = run.slice(run.indexOf('~') + 1);
+      if (CHAIN_PARAMS.has(param) && recipeFor(model, param, undefined, member) && Math.abs(Number(s) - step) <= CHAIN_HOURS) continue;
+      this.cache.delete(key);
+      this.resolved.delete(key);
+      this.bytes -= e.bytes;
+    }
   }
 
   /** A locally averaged ensemble mean: averaging 20–51 members is slow, so it's kept across visits. */
@@ -527,6 +733,46 @@ export class DataSource {
       if (j < steps.length - 1 && steps[j] % 6 === 0) this.#put(keyOf(steps[j]), acc);
     }
     return acc;
+  }
+
+  /**
+   * Inputs of a computed field (`out`; null for a probability's member inputs).
+   * Published fields read only for the computation are transient: decoded, shared
+   * by every request made while they load (10 m u and v both reading NBM's wind
+   * speed and direction), and dropped, never packed into the cache. Running totals
+   * (which later hours build on), fields the view shows itself, computed fields and
+   * locally averaged means go through the cache as usual.
+   */
+  #inputsFor(model, run, step, spec, out) {
+    const member = splitRun(run)[1];
+    const cached = (s) =>
+      this.#computedMean(model, run) ||
+      !!recipeFor(model, s.param, s.level, member) ||
+      (out != null && (s.param === out || CHAIN_PARAMS.has(s.param) || this.viewDirect.has(`${s.param}/${s.level ?? 'sfc'}`)));
+    const names = Object.keys(spec);
+    return Promise.all(names.map((n) => (cached(spec[n]) ? this.field(model, run, step, spec[n]) : this.#transient(model, run, step, spec[n])))).then(
+      (fields) => Object.fromEntries(names.map((n, i) => [n, fields[i]])),
+    );
+  }
+
+  #transient(model, run, step, { param, level, stepOffset = 0 }) {
+    step += stepOffset;
+    if (step < 0) return Promise.resolve(null);
+    const key = `${model}/${run}/${step}/${param}/${level ?? 'sfc'}`;
+    if (this.resolved.has(key)) return this.#value(this.cache.get(key));
+    const m = modelFor(model, splitRun(run)[1]);
+    if (step === 0 && m.source.zeroAtStart(param)) return this.field(model, run, step, { param, level });
+    if (!m.source.has(param, level)) return Promise.reject(new Error(`${param}${level ? ` at ${level} hPa` : ''} isn't published for ${m.name}`));
+    let p = this.transient.get(key);
+    if (!p) {
+      p = this.#raw(model, run, step, param, level, null, PRIORITY.background, false);
+      this.transient.set(key, p);
+      p.then(
+        () => this.transient.delete(key),
+        () => this.transient.delete(key),
+      );
+    }
+    return p;
   }
 
   /** Load a named set of inputs: { name: {param, level} } -> { name: field } */

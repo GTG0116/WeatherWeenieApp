@@ -2,7 +2,7 @@
 // parameters it publishes, and recipes for the ones it doesn't.
 //
 // Canonical params: 2t 2d 10u 10v 10fg sbcape mlcape mucape sbcin mlcin mucin
-// srh1 srh3 ush6 vsh6 ltng dcape msl sp tp sf tprate ptype refc tcc lcc mcc hcc
+// srh1 srh3 ush6 vsh6 ltng dcape msl sp tp sf tprate ptype refc tcc lcc mcc hcc vis
 // (surface) and t gh u v vo r (pressure levels). Accumulations
 // (tp, sf) are metres of water since F000.
 import { ecmwfSource, fetchRetry, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
@@ -10,6 +10,7 @@ import {
   classifyPrecipType, dewpointFromRh, ptypeFromCategorical, ptypeFromWmo, relativeVorticity, vorticity,
 } from './derived.js';
 import { rhFromQ } from './thermo.js';
+import { parseProb } from './probability.js';
 
 const UPPER = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50, 10];
 const p2 = (n) => String(n).padStart(2, '0');
@@ -59,6 +60,19 @@ const tprateFromTp6 = {
   },
 };
 
+// Mean rate over the latest precipitation bucket (GEFS: 3 or 6 h; restarts every
+// `hours`), kg m⁻² s⁻¹: one field, no running total needed.
+const tprateFromBucket = (hours) => ({
+  zeroAtStart: true,
+  needs: () => ({ b: { param: 'apcp' } }),
+  make: ({ b }, ctx) => {
+    const span = ctx.step - (ctx.step > 0 ? Math.floor((ctx.step - 1) / hours) * hours : 0) || hours;
+    const out = new Float32Array(b.values.length);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) * (1000 / (span * 3600));
+    return out;
+  },
+});
+
 // Run total (m) from precipitation published in buckets that restart every
 // `hours` (GEFS 6 h, REFS 1 h): the total at the bucket's start plus the bucket.
 const tpFromBuckets = (hours) => ({
@@ -89,7 +103,7 @@ const dewpointFromRh2 = {
   make: ({ t, rh }) => dewpointFromRh(t.values, rh.values),
 };
 
-const NCEP_SURFACE = ['2t', '2d', '10u', '10v', '10fg', 'mucape', 'msl', 'sp', 'tp', 'tprate', 'refc', 'tcc', 'lcc', 'mcc', 'hcc'];
+const NCEP_SURFACE = ['2t', '2d', '10u', '10v', '10fg', 'mucape', 'msl', 'sp', 'tp', 'tprate', 'refc', 'tcc', 'lcc', 'mcc', 'hcc', 'vis'];
 const NCEP_PTYPE = ['crain', 'csnow', 'cfrzr', 'cicep'];
 const NCEP_UPPER = ['t', 'gh', 'u', 'v', 'absv', 'r'];
 // Severe-weather fields: CAPE/CIN for surface, 90 hPa mixed-layer and most-unstable parcels, helicity
@@ -181,6 +195,110 @@ const GEPS_PARAMS = {
   v: { v: 'VGRD', l: isbl, upper: true },
   r: { v: 'RH', l: isbl, upper: true },
 };
+// MSC GDPS (deterministic, 0.15°): one file per field, MSC's own names.
+const gdpsLevel = (l) => `IsbL-${String(l).padStart(4, '0')}`;
+// GDPS precip type (instantaneous): 1 rain, 2 rain/snow mix, 3 freezing rain,
+// 4 ice pellets, 5 snow, 6 none (worked out from the fields themselves) → table 4.201.
+const GDPS_PTYPE = [0, 1, 7, 3, 8, 5, 0];
+const GDPS_PARAMS = {
+  '2t': { v: 'AirTemp', l: 'AGL-2m' },
+  '2d': { v: 'DewPoint', l: 'AGL-2m' },
+  '10u': { v: 'WindU', l: 'AGL-10m' },
+  '10v': { v: 'WindV', l: 'AGL-10m' },
+  '10fg': { v: 'WindGust', l: 'AGL-10m' },
+  msl: { v: 'Pressure', l: 'MSL' },
+  sp: { v: 'Pressure', l: 'Sfc' },
+  tp: { v: 'Precip-Accum', l: 'Sfc', scale: 1e-3, zeroAtStart: true }, // kg m⁻² since F000 → m
+  sf: { v: 'Snow-Accum', l: 'Sfc', scale: 1e-3, zeroAtStart: true }, // snow water since F000
+  tprate: { v: 'PrecipRate', l: 'Sfc', zeroAtStart: true }, // kg m⁻² s⁻¹; F000 has none
+  ptype: {
+    v: 'PrecipType-Instant',
+    l: 'Sfc',
+    f: (v) => {
+      for (let i = 0; i < v.length; i++) v[i] = GDPS_PTYPE[Math.round(v[i])] ?? 0;
+    },
+  },
+  tcc: { v: 'TotalCloudCover', l: 'Sfc', scale: 0.01 },
+  t: { v: 'AirTemp', l: gdpsLevel, upper: true },
+  gh: { v: 'GeopotentialHeight', l: gdpsLevel, upper: true },
+  u: { v: 'WindU', l: gdpsLevel, upper: true },
+  v: { v: 'WindV', l: gdpsLevel, upper: true },
+  r: { v: 'RelativeHumidity', l: gdpsLevel, upper: true },
+  vo: { v: 'RelativeVorticity', l: gdpsLevel, upper: true }, // 200, 250, 500, 700, 850 hPa only
+};
+const PROFILE_GDPS = [1000, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100];
+
+// ---------------------------------------------------------------- NBM
+// NBM files also hold probabilities, percentiles and spreads of the same fields: only
+// the plain ones are read (extra: ''). Winds come as speed and direction, and
+// precipitation and snowfall as 1 h amounts (every step) and 6 h amounts (every 6th hour).
+const nbmAmount = (v, hours, scale) => ({ v, l: 'surface', scale, t: (s) => new RegExp(`^${s - hours}-${s} hour acc fcst$`) });
+const nbmPtype = (codes) => ({ v: 'PTYPE', l: 'surface', x: new RegExp(`^prob ${codes}:`) }); // % chance of each type
+const NBM_PARAMS = {
+  '10fg': { v: 'GUST', l: '10 m above ground' },
+  sbcape: { v: 'CAPE', l: 'surface' },
+  tcc: { v: 'TCDC', l: 'surface', scale: 0.01 },
+  // 10 m wind: speed and direction, turned into u/v in the decode worker (see ncepSource)
+  '10u': { v: 'WIND', l: '10 m above ground', polar: { dir: 'wdir', pair: '10v', u: true } },
+  '10v': { v: 'WIND', l: '10 m above ground', polar: { dir: 'wdir', pair: '10u' } },
+  wdir: { v: 'WDIR', l: '10 m above ground' },
+  apcp1: nbmAmount('APCP', 1, 1e-3), // kg m⁻² → m
+  tprate: nbmAmount('APCP', 1, 1 / 3600), // the past hour's amount as a mean rate, kg m⁻² s⁻¹
+  apcp6: nbmAmount('APCP', 6, 1e-3),
+  asnow1: nbmAmount('ASNOW', 1), // snow depth, m
+  asnow6: nbmAmount('ASNOW', 6),
+  prain: nbmPtype('>=1 <2'),
+  pfzra: nbmPtype('>=3 <4'),
+  psnow: nbmPtype('>=5 <7'),
+  psleet: nbmPtype('>=8 <9'),
+};
+// Every run (NBM runs hourly) goes hourly to 48 h, then has every field at the
+// 3-hourly valid times (00, 03, 06 … UTC) to 192 h and the 6-hourly ones to 264 h.
+// The other hours carry precipitation only, so they aren't listed.
+const nbmSteps = (hour) => [
+  ...range(1, 48, 1),
+  ...range(49, 192, 1).filter((s) => (hour + s) % 3 === 0),
+  ...range(193, 264, 1).filter((s) => (hour + s) % 6 === 0),
+];
+// Totals since F000 exist where the amounts join up: every hour to 48 h, then at the
+// 6-hourly valid times (where NBM publishes 6 h amounts).
+const nbmTotalAt = (step, hour) => step <= 48 || (hour + step) % 6 === 0;
+/** An NBM total since F000 (`self`) from its 1 h and 6 h amounts, × k; NaN where they don't join up. */
+const nbmTotal = (self, a1, a6, k = 1) => ({
+  zeroAtStart: true,
+  needs: (level, ctx) => {
+    if (!nbmTotalAt(ctx.step, ctx.hour ?? 0)) return { b: { param: a1 } };
+    const h = ctx.step <= 48 ? 1 : 6;
+    return { b: { param: h === 1 ? a1 : a6 }, ...(ctx.step > h ? { prev: { param: self, stepOffset: -h } } : {}) };
+  },
+  make: ({ b, prev }, ctx) => {
+    const out = new Float32Array(b.values.length);
+    if (!nbmTotalAt(ctx.step, ctx.hour ?? 0)) return out.fill(NaN);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) * k + (prev ? prev.values[i] : 0);
+    return out;
+  },
+});
+/** The most likely precip type (table 4.201: rain, freezing rain, snow, ice pellets). */
+const nbmPtypeRecipe = {
+  needs: () => ({ r: { param: 'prain' }, z: { param: 'pfzra' }, s: { param: 'psnow' }, i: { param: 'psleet' } }),
+  make: ({ r, z, s, i }) => {
+    const out = new Float32Array(r.values.length);
+    const types = [[1, r.values], [3, z.values], [5, s.values], [8, i.values]];
+    for (let k = 0; k < out.length; k++) {
+      let best = 0;
+      let top = 0;
+      for (const [code, v] of types) {
+        if (v[k] > top) {
+          top = v[k];
+          best = code;
+        }
+      }
+      out[k] = best;
+    }
+    return out;
+  },
+};
+
 const refsMember = (m) => `m${p3(m)}`; // REFS members 1..5 → m001..m005
 const NCEP_ENS_LEVELS = [1000, 925, 850, 700, 500, 300, 250, 200, 100, 50, 10];
 const NO_300 = NCEP_ENS_LEVELS.filter((l) => l !== 300); // GEFS/GEPS publish no 300 hPa temperature
@@ -221,7 +339,7 @@ const RRFS_HOURLY = ncepSource({
   maxRuns: 5,
   steps: (hour) => (hour % 3 === 0 ? [] : range(1, 18, 1)),
   levels: [],
-  params: ['2t', '2d', '10u', '10v', '10fg', 'msl', 'sp', 'tp', 'tprate', 'refc', ...NCEP_PTYPE],
+  params: ['2t', '2d', '10u', '10v', '10fg', 'msl', 'sp', 'tp', 'tprate', 'refc', 'vis', ...NCEP_PTYPE],
   overrides: { msl: { v: 'MSLET' } },
   gridRelativeWinds: true,
   regrid: { res: 0.03 },
@@ -383,6 +501,24 @@ export const MODELS = {
     },
     notes: { ptype: 'type from weather code', tprate: 'interval mean' },
   },
+  gdps: {
+    name: 'CMC GDPS',
+    label: 'GDPS',
+    sub: 'CMC',
+    group: 'global',
+    credit: 'ECCC MSC Datamart (Open Government Licence – Canada)',
+    source: mscSource({
+      model: 'gdps',
+      // Every field 3-hourly to 240 h (the hours in between carry only some surface fields)
+      steps: () => range(0, 240, 3),
+      levels: UPPER,
+      paramLevels: { vo: [850, 700, 500, 250, 200] },
+      profileLevels: PROFILE_GDPS,
+      params: GDPS_PARAMS,
+    }),
+    derived: { vo: vortFromWinds, dcape: dcapeFrom(DCAPE_FINE) }, // vorticity computed only where it isn't published
+    profile: PROFILE_GDPS,
+  },
 
   // Ensembles: `members` lists what can be shown — the mean (published, or
   // averaged here from every member), the control (member 0) and members 1..count.
@@ -420,11 +556,12 @@ export const MODELS = {
       '2d': dewpointFromRh2,
       vo: vortFromWinds,
       tp: tpFromBuckets(6),
-      tprate: tprateFromTp6,
+      sfb: sfFromBuckets(6), // for snowfall probabilities (the snowfall maps split precipitation by type)
+      tprate: tprateFromBucket(6),
       ptype: { ...ptypeCategorical, zeroAtStart: true }, // F000 has no precip-type flags
       dcape: dcapeFrom(DCAPE_ENS),
     },
-    notes: { tprate: '6 h mean' },
+    notes: { tprate: 'mean over the latest 3–6 h' },
     profile: PROFILE_ENS,
   },
   ens: {
@@ -507,12 +644,13 @@ export const MODELS = {
       maxRuns: 4,
       steps: () => range(1, 60, 1),
       levels: [925, 850, 700, 500, 250],
-      params: ['2t', '2d', '10u', '10v', 'sbcape', 'mlcape', 'mucape', 'sbcin', 'mlcin', 'mucin', 'srh3', 'msl', 'apcp', 'refc', 'tcc', 'lcc', 'mcc', 'hcc', ...NCEP_PTYPE, 't', 'gh', 'u', 'v'],
+      params: ['2t', '2d', '10u', '10v', 'sbcape', 'mlcape', 'mucape', 'sbcin', 'mlcin', 'mucin', 'srh3', 'msl', 'apcp', 'tprate', 'refc', 'tcc', 'lcc', 'mcc', 'hcc', 'vis', ...NCEP_PTYPE, 't', 'gh', 'u', 'v'],
       overrides: {
         msl: { v: 'MSLET' },
         mucape: { l: '180-0 mb above ground' },
         mucin: { l: '180-0 mb above ground' },
         refc: { file: 'pmm' },
+        tprate: { v: 'APCP', l: 'surface', t: /^\d+-\d+ hour acc fcst$/, scale: 1 / 3600 }, // 1 h bucket as a mean rate
       },
       gridRelativeWinds: true,
       regrid: { res: 0.03 },
@@ -520,10 +658,6 @@ export const MODELS = {
     derived: {
       vo: vortFromWinds,
       tp: tpFromBuckets(1),
-      tprate: {
-        needs: () => ({ b: { param: 'apcp' } }),
-        make: ({ b }) => b.values.map((x) => Math.max(0, x) * (1000 / 3600)), // 1 h mean, kg m⁻² s⁻¹
-      },
       ptype: ptypeCategorical,
     },
     notes: { tprate: '1 h mean', refc: 'probability-matched mean' },
@@ -538,17 +672,16 @@ export const MODELS = {
         },
         levels: [1000, 925, 850, 700, 600, 500, 400, 300, 250],
         profileLevels: PROFILE_REFS,
-        params: ['2t', '2d', '10u', '10v', '10fg', 'sbcape', 'sbcin', 'srh1', 'srh3', 'ush6', 'vsh6', 'ltng', 'sp', 'msl', 'tp', 'refc', 'tcc', 'lcc', 'mcc', 'hcc', ...NCEP_PTYPE, ...NCEP_UPPER, 'q'],
-        overrides: { msl: { v: 'MSLET' } },
+        params: ['2t', '2d', '10u', '10v', '10fg', 'sbcape', 'sbcin', 'srh1', 'srh3', 'ush6', 'vsh6', 'ltng', 'sp', 'msl', 'tp', 'tprate', 'refc', 'tcc', 'lcc', 'mcc', 'hcc', 'vis', ...NCEP_PTYPE, ...NCEP_UPPER, 'q'],
+        overrides: {
+          msl: { v: 'MSLET' },
+          tprate: { v: 'APCP', l: 'surface', t: (s) => new RegExp(`^${s - 1}-${s} hour acc fcst$`), scale: 1 / 3600 }, // 1 h bucket as a mean rate
+        },
         gridRelativeWinds: true,
         regrid: { res: 0.03 },
       }),
       derived: {
         vo: vortFromAbsv,
-        tprate: {
-          needs: () => ({ tp: { param: 'tp' }, prev: { param: 'tp', stepOffset: -1 } }),
-          make: ({ tp, prev }) => tp.values.map((x, i) => Math.max(0, x - (prev ? prev.values[i] : 0)) * (1000 / 3600)), // 1 h mean
-        },
         ptype: ptypeCategorical,
         dcape: dcapeFrom(DCAPE_FINE),
       },
@@ -714,10 +847,36 @@ export function hasProfiles(modelId, member) {
     levels.every((l) => ['t', 'gh', 'u', 'v', 'r'].every((p) => supports(modelId, p, l, member)));
 }
 
-/** Whether a model (or one of its members) can provide a param (directly or via a recipe). */
-export function supports(modelId, param, level, member) {
+/** The members an ensemble probability is counted over: the control and every perturbed member. */
+export function ensembleMembers(modelId) {
+  return membersOf(modelId).filter((m) => m.id !== 'mean').map((m) => m.id);
+}
+
+/**
+ * The recipe a param is computed with, or null when it's read as published: a
+ * field the model publishes is always read rather than computed (GDPS publishes
+ * vorticity on five levels and is computed from winds only on the others).
+ */
+export function recipeFor(modelId, param, level, member) {
   const m = modelFor(modelId, member);
   const recipe = m.derived[param];
+  if (!recipe || recipe.sum) return recipe ?? null;
+  return m.source.has(param, level ?? undefined) ? null : recipe;
+}
+
+/** Whether a model (or one of its members) can provide a param (directly or via a recipe). */
+export function supports(modelId, param, level, member) {
+  const prob = parseProb(param);
+  if (prob) {
+    // Counted over the members, whatever member is picked: ask what one of them publishes.
+    const one = ensembleMembers(modelId)[0];
+    if (!one) return false;
+    const has = (p, l) => supports(modelId, p, l, one);
+    const spec = prob.kind.inputs(has);
+    return !!spec && Object.values(spec).every((x) => has(x.param, x.level));
+  }
+  const m = modelFor(modelId, member);
+  const recipe = recipeFor(modelId, param, level, member);
   if (recipe?.sum) return m.source.has(recipe.sum);
   if (recipe) return Object.values(recipe.needs(level, {})).every((s) => supports(modelId, s.param, s.level, member));
   return m.source.has(param, level ?? undefined);

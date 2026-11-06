@@ -135,7 +135,10 @@ export class Accumulator {
 
     // Runs without an F000 file (REFS) start from zero totals at their first step.
     const first = run.steps[0] ?? 0;
-    const chain = [first, ...K.chain(run.steps, step, model).filter((s) => s > first)];
+    // Only steps with a total since F000 (NBM's 3-hourly steps between its 6 h amounts have none).
+    const at = MODELS[model].totalAt;
+    const hour = Number(run.id.slice(8, 10));
+    const chain = [first, ...K.chain(at ? run.steps.filter((s) => at(s, hour)) : run.steps, step, model).filter((s) => s > first)];
     let start = 0;
     for (let i = chain.length - 1; i > 0; i--) {
       if (store.has(chain[i])) {
