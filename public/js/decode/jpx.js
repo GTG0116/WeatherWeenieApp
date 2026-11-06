@@ -20,6 +20,14 @@ const u16 = (b, i) => (b[i] << 8) | b[i + 1];
 const u32 = (b, i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
 
 // ---------------------------------------------------------------- MQ decoder
+// The table as flat typed arrays, and the 32-bit C register as two 16-bit halves
+// (chigh, clow), so every operation stays in small integers: this loop is most of
+// the time JPEG 2000 fields (GEPS, GDPS) take to decode.
+const QE_Q = Uint16Array.from(QE, (r) => r[0]);
+const QE_NMPS = Uint8Array.from(QE, (r) => r[1]);
+const QE_NLPS = Uint8Array.from(QE, (r) => r[2]);
+const QE_SWITCH = Uint8Array.from(QE, (r) => r[3]);
+
 class MQDecoder {
   constructor(data) {
     // Two 0xFF bytes mark the end, as the decoder expects past the last segment.
@@ -29,71 +37,88 @@ class MQDecoder {
     this.d[data.length + 1] = 0xff;
     this.end = data.length;
     this.bp = 0;
-    this.c = (this.d[0] << 16) >>> 0;
+    this.chigh = this.d[0];
+    this.clow = 0;
+    this.ct = 0;
     this.byteIn();
-    this.c = (this.c << 7) >>> 0;
+    this.chigh = ((this.chigh << 7) & 0xffff) | ((this.clow >> 9) & 0x7f);
+    this.clow = (this.clow << 7) & 0xffff;
     this.ct -= 7;
     this.a = 0x8000;
-    this.state = new Uint8Array(19);
-    this.mps = new Uint8Array(19);
-    this.state[0] = 4; // all-zero neighbourhood
-    this.state[17] = 3; // run-length
-    this.state[18] = 46; // uniform
+    // Per context: state index << 1 | MPS
+    this.cx = new Uint8Array(19);
+    this.cx[0] = 4 << 1; // all-zero neighbourhood
+    this.cx[17] = 3 << 1; // run-length
+    this.cx[18] = 46 << 1; // uniform
   }
 
   byteIn() {
     const d = this.d;
-    if (d[this.bp] === 0xff) {
-      if (this.bp >= this.end || d[this.bp + 1] > 0x8f) {
-        this.c = (this.c + 0xff00) >>> 0;
+    let bp = this.bp;
+    if (d[bp] === 0xff) {
+      if (bp >= this.end || d[bp + 1] > 0x8f) {
+        this.clow += 0xff00;
         this.ct = 8;
       } else {
-        this.bp++;
-        this.c = (this.c + (d[this.bp] << 9)) >>> 0;
+        bp++;
+        this.clow += d[bp] << 9;
         this.ct = 7;
       }
     } else {
-      this.bp++;
-      this.c = (this.c + ((this.bp < this.end + 2 ? d[this.bp] : 0xff) << 8)) >>> 0;
+      bp++;
+      this.clow += (bp < this.end + 2 ? d[bp] : 0xff) << 8;
       this.ct = 8;
+    }
+    this.bp = bp;
+    if (this.clow > 0xffff) {
+      this.chigh += this.clow >> 16;
+      this.clow &= 0xffff;
     }
   }
 
   decode(cx) {
-    const s = this.state[cx];
-    const qe = QE[s][0];
+    const st = this.cx[cx];
+    let s = st >> 1;
+    let mps = st & 1;
+    const qe = QE_Q[s];
     let bit;
-    this.a -= qe;
-    if (this.c >>> 16 < qe) {
+    let a = this.a - qe;
+    if (this.chigh < qe) {
       // LPS exchange
-      if (this.a < qe) {
-        bit = this.mps[cx];
-        this.state[cx] = QE[s][1];
+      if (a < qe) {
+        bit = mps;
+        s = QE_NMPS[s];
       } else {
-        bit = 1 - this.mps[cx];
-        if (QE[s][3]) this.mps[cx] = bit;
-        this.state[cx] = QE[s][2];
+        bit = mps ^ 1;
+        if (QE_SWITCH[s]) mps = bit;
+        s = QE_NLPS[s];
       }
-      this.a = qe;
+      a = qe;
     } else {
-      this.c = (this.c - qe * 65536) >>> 0;
-      if (this.a & 0x8000) return this.mps[cx];
+      this.chigh -= qe;
+      if (a & 0x8000) {
+        this.a = a;
+        return mps;
+      }
       // MPS exchange
-      if (this.a < qe) {
-        bit = 1 - this.mps[cx];
-        if (QE[s][3]) this.mps[cx] = bit;
-        this.state[cx] = QE[s][2];
+      if (a < qe) {
+        bit = mps ^ 1;
+        if (QE_SWITCH[s]) mps = bit;
+        s = QE_NLPS[s];
       } else {
-        bit = this.mps[cx];
-        this.state[cx] = QE[s][1];
+        bit = mps;
+        s = QE_NMPS[s];
       }
     }
     do {
       if (this.ct === 0) this.byteIn();
-      this.a <<= 1;
-      this.c = (this.c << 1) >>> 0;
+      a <<= 1;
+      this.chigh = ((this.chigh << 1) & 0xffff) | ((this.clow >> 15) & 1);
+      this.clow = (this.clow << 1) & 0xffff;
       this.ct--;
-    } while (!(this.a & 0x8000));
+    } while (!(a & 0x8000));
+    this.a = a;
+    this.cx[cx] = (s << 1) | mps;
     return bit;
   }
 }
@@ -202,6 +227,19 @@ function zcTable(orient) {
   return t;
 }
 const ZC = [zcTable(LL), zcTable(HL), zcTable(LH), zcTable(HH)];
+// The same contexts indexed by a packed neighbour count: horizontal (bits 0–1),
+// vertical (2–3) and diagonal (4–6) significant neighbours, kept up to date as
+// coefficients become significant instead of recounted at every visit.
+const ZCP = ZC.map((t) => {
+  const p = new Uint8Array(128);
+  for (let i = 0; i < 128; i++) {
+    const hh = i & 3;
+    const vv = (i >> 2) & 3;
+    const dd = i >> 4;
+    if (hh <= 2 && vv <= 2 && dd <= 4) p[i] = t[(hh * 3 + vv) * 5 + dd];
+  }
+  return p;
+});
 
 /**
  * Decode one code-block's coding passes into signed integer coefficients.
@@ -215,15 +253,11 @@ function decodeBlock(data, w, h, orient, mb, zeroPlanes, passes) {
   const neg = new Uint8Array(W * (h + 2));
   const coded = new Uint8Array(w * h); // visited in this bit-plane's significance pass
   const refined = new Uint8Array(w * h);
-  const zc = ZC[orient];
+  const nb = new Uint8Array(W * (h + 2)); // packed significant-neighbour counts (see ZCP)
+  const zc = ZCP[orient];
   const mq = new MQDecoder(data);
 
-  const ctxOf = (p) => {
-    const hh = sig[p - 1] + sig[p + 1];
-    const vv = sig[p - W] + sig[p + W];
-    const dd = sig[p - W - 1] + sig[p - W + 1] + sig[p + W - 1] + sig[p + W + 1];
-    return zc[(hh * 3 + vv) * 5 + dd];
-  };
+  const ctxOf = (p) => zc[nb[p]];
   const contrib = (p) => (sig[p] ? (neg[p] ? -1 : 1) : 0);
   const decodeSign = (p) => {
     const H = Math.max(-1, Math.min(1, contrib(p - 1) + contrib(p + 1)));
@@ -243,6 +277,14 @@ function decodeBlock(data, w, h, orient, mb, zeroPlanes, passes) {
     sig[p] = 1;
     neg[p] = decodeSign(p);
     out[y * w + x] = 1 << bp;
+    nb[p - 1] += 1;
+    nb[p + 1] += 1;
+    nb[p - W] += 4;
+    nb[p + W] += 4;
+    nb[p - W - 1] += 16;
+    nb[p - W + 1] += 16;
+    nb[p + W - 1] += 16;
+    nb[p + W + 1] += 16;
   };
 
   let bp = mb - 1 - zeroPlanes;
@@ -254,8 +296,8 @@ function decodeBlock(data, w, h, orient, mb, zeroPlanes, passes) {
         for (let x = 0; x < w; x++) {
           for (let y = y0; y < y0 + 4 && y < h; y++) {
             const p = (y + 1) * W + x + 1;
-            if (sig[p]) continue;
-            const cx = ctxOf(p);
+            if (sig[p] || !nb[p]) continue;
+            const cx = zc[nb[p]];
             if (!cx) continue;
             coded[y * w + x] = 1;
             if (mq.decode(cx)) setSig(x, y, p, bp);
@@ -272,8 +314,7 @@ function decodeBlock(data, w, h, orient, mb, zeroPlanes, passes) {
             if (!sig[p] || coded[i]) continue;
             let cx = 16;
             if (!refined[i]) {
-              const any = sig[p - 1] | sig[p + 1] | sig[p - W] | sig[p + W] | sig[p - W - 1] | sig[p - W + 1] | sig[p + W - 1] | sig[p + W + 1];
-              cx = any ? 15 : 14;
+              cx = nb[p] ? 15 : 14;
               refined[i] = 1;
             }
             if (mq.decode(cx)) out[i] |= 1 << bp;
@@ -290,7 +331,7 @@ function decodeBlock(data, w, h, orient, mb, zeroPlanes, passes) {
             let run = true;
             for (let k = 0; k < 4 && run; k++) {
               const p = (y0 + k + 1) * W + x + 1;
-              if (sig[p] || coded[(y0 + k) * w + x] || ctxOf(p)) run = false;
+              if (sig[p] || coded[(y0 + k) * w + x] || nb[p]) run = false;
             }
             if (run) {
               if (!mq.decode(17)) continue;

@@ -6,7 +6,7 @@ import { Accumulator, KINDS } from './accum.js';
 import { PRODUCTS, PTYPE_CATEGORY, PTYPE_NAMES, accumulationOf, isobarContour, productAvailable, productById } from './products.js';
 import { PRECIP_TYPES } from './colormaps.js';
 import { unitFor } from './units.js';
-import { MODELS, hasProfiles, membersOf, supports } from './models.js';
+import { MODELS, ensembleMembers, hasProfiles, membersOf, supports } from './models.js';
 import { MapTools } from './tools.js';
 import { SoundingPanel } from './sounding.js';
 import { CrossSectionPanel } from './xsect.js';
@@ -33,7 +33,7 @@ const saved = (() => {
   }
 })();
 
-const PRODUCT_GROUPS = ['upper', 'surface', 'severe', 'precip', 'winter'];
+const PRODUCT_GROUPS = ['upper', 'surface', 'severe', 'precip', 'winter', 'prob'];
 
 const savedMember = (model) => {
   const m = saved.members?.[model];
@@ -123,14 +123,24 @@ const modelName = (model = state.model) => MODELS[model].name;
 // The run as the data layer sees it: ensemble members (and run views) are cached under "run~member".
 const runKey = () => (viewOf() ? `${state.run.id}~${viewOf()}` : state.run.id);
 const dataRun = () => ({ ...state.run, id: runKey() });
+// Probabilities are counted over every member, whatever member is picked.
 const memberName = () =>
-  !state.member ? '' : state.member === 'mean' ? ' mean' : state.member === '0' ? ' control' : ` member ${state.member}`;
+  !state.member || product().prob ? '' : state.member === 'mean' ? ' mean' : state.member === '0' ? ' control' : ` member ${state.member}`;
+// Option labels can depend on the units (probability thresholds).
+const optionLabel = (o) => (typeof o.label === 'function' ? o.label(state.units) : o.label);
+const checkStep = (p, opt, s) => p.check?.(opt, s, state.run, state.model) ?? null;
 
 // ------------------------------------------------------------------ setup
 const globe = new Globe($('#globe'));
 const labels = new LabelLayer($('#labels'), globe);
 const particles = new WindParticles(globe);
 const data = new DataSource();
+// Counting ensemble members for a probability: show progress for the hour on screen.
+data.onProgress = ({ model, run, step: s, done, total }) => {
+  if (model === state.model && run === runKey() && s === step() && product().prob && done < total) {
+    setStatus(`Counting ensemble members · ${done}/${total}…`);
+  }
+};
 const accum = new Accumulator(data);
 let current = null; // what's on the globe now
 const radar = new RadarView({
@@ -644,7 +654,7 @@ function buildModels() {
 function buildMembers() {
   const list = membersOf(state.model);
   const sel = $('#member-select');
-  $('#member-field').hidden = !list.length;
+  $('#member-field').hidden = !list.length || product().prob;
   sel.innerHTML = list.map((m) => `<option value="${m.id}">${m.label}</option>`).join('');
   if (state.member) sel.value = state.member;
 }
@@ -680,7 +690,7 @@ function buildOptions() {
     const b = document.createElement('button');
     const ok = !p.options || productAvailable(p, state.model, o.value, viewOf());
     b.className = 'pill' + (p.options && o.value === option() ? ' active' : '') + (ok ? '' : ' unavailable');
-    b.textContent = o.label;
+    b.textContent = optionLabel(o);
     b.disabled = !ok;
     if (!ok) b.title = `Not published by ${modelName()}`;
     b.addEventListener('click', () => {
@@ -756,6 +766,9 @@ function syncProductButtons() {
         : `Not available from ${modelName()}`;
   });
   document.querySelectorAll('#models button').forEach((b) => b.classList.toggle('active', b.dataset.model === state.model));
+  // Probabilities need an ensemble's members.
+  $('#prob-block').hidden = !MODELS[state.model].members;
+  $('#member-field').hidden = !membersOf(state.model).length || !!product().prob;
   document.querySelectorAll('#mode-switch button').forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
   $('.brand-sub').textContent = radarMode() ? 'NEXRAD & TDWR radar' : 'Global NWP viewer';
   $('#credit').textContent = radarMode() ? 'NOAA NEXRAD & TDWR Level II/III (Unidata on AWS), NWS radar status' : MODELS[state.model].credit;
@@ -907,6 +920,8 @@ function buildUnits() {
       state.units = b.dataset.units;
       persist();
       buildUnits();
+      if (product().options?.some((o) => typeof o.label === 'function')) buildOptions();
+      if (current && !radarMode()) $('#title').textContent = `${modelName()}${memberName()} · ${product().title(option(), state.model, state.units)}`;
       if (current) {
         drawLegend();
         updateCityValues();
@@ -1229,7 +1244,7 @@ async function doRender(seq) {
   const spec = inputSpec(p, opt);
   data.focusStep = st;
   retainView(p, opt);
-  $('#title').textContent = `${modelName(model)}${memberName()} · ${p.title(opt, model)}`;
+  $('#title').textContent = `${modelName(model)}${memberName()} · ${p.title(opt, model, state.units)}`;
   const kind = accumulation(p);
   const n = Object.keys(spec).length;
   const t0 = performance.now();
@@ -1238,7 +1253,7 @@ async function doRender(seq) {
   let res;
   let meta;
 
-  const problem = p.check?.(opt, st, state.run);
+  const problem = checkStep(p, opt, st);
   if (problem) {
     current = null;
     globe.clearLayer();
@@ -1273,7 +1288,9 @@ async function doRender(seq) {
       return;
     }
   } else {
-    if (!data.has(model, run.id, st, spec)) setStatus(`Fetching & decoding ${n} field${n > 1 ? 's' : ''}…`);
+    if (!data.has(model, run.id, st, spec)) {
+      setStatus(p.prob ? `Counting ${ensembleMembers(model).length} ensemble members…` : `Fetching & decoding ${n} field${n > 1 ? 's' : ''}…`);
+    }
     try {
       inp = await data.inputs(model, run.id, st, spec);
     } catch (err) {
@@ -1321,7 +1338,7 @@ async function doRender(seq) {
   refreshTooltip();
 
   const ms = performance.now() - t0;
-  const what = kind ? 'Accumulated locally' : `Decoded ${n} field${n > 1 ? 's' : ''} locally`;
+  const what = kind ? 'Accumulated locally' : p.prob ? `Counted ${ensembleMembers(model).length} members locally` : `Decoded ${n} field${n > 1 ? 's' : ''} locally`;
   setStatus(ms > 60 ? `${what} · ${Math.round(ms)} ms` : 'Ready', 'done');
   markCached();
   preload(seq);
@@ -1367,10 +1384,10 @@ async function preload(seq) {
   }
   const spec = inputSpec();
   const i0 = state.stepIndex;
-  const todo = [...all.slice(i0 + 1), ...all.slice(0, i0)].filter((s) => !p.check?.(option(), s, state.run) && !data.has(model, run.id, s, spec));
+  const todo = [...all.slice(i0 + 1), ...all.slice(0, i0)].filter((s) => !checkStep(p, option(), s) && !data.has(model, run.id, s, spec));
   if (!todo.length) return report(true);
   // A few frames at once; locally averaged ensemble means are many downloads each.
-  const parallel = MODELS[model].members?.mean === 'computed' && state.member === 'mean' ? 2 : 4;
+  const parallel = p.prob || (MODELS[model].members?.mean === 'computed' && state.member === 'mean') ? 2 : 4;
   let next = 0;
   const lane = async () => {
     while (next < todo.length && live() && !data.full()) {
@@ -1450,7 +1467,14 @@ function updateBroadcast() {
     const p = product();
     const opt = option();
     const o = p.options?.find((x) => x.value === opt);
-    productText = typeof opt === 'number' && p.group === 'upper' ? `${opt} mb ${p.name}` : o && p.options.length > 1 ? `${p.name} ${o.label}` : p.name;
+    productText =
+      typeof opt === 'number' && p.group === 'upper'
+        ? `${opt} mb ${p.name}`
+        : p.prob
+          ? `${p.name} ${o ? optionLabel(o) : ''} chance`
+          : o && p.options.length > 1
+            ? `${p.name} ${optionLabel(o)}`
+            : p.name;
     time = runTime(state.run) + step() * 3600e3;
     const r = state.run;
     const rt = new Date(runTime(r));

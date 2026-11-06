@@ -1,7 +1,7 @@
 // Local static server for development. The app itself is plain static files in
 // public/: the browser fetches model data straight from the public buckets, so
 // this mostly serves files (GitHub Pages / Cloudflare Pages do the same in
-// production). The one exception is /proxy/msc/: Canada's MSC Datamart (GEPS)
+// production). The one exception is /proxy/msc/: Canada's MSC Datamart (GEPS, GDPS)
 // sends no CORS headers, so those requests are relayed (worker/index.js
 // does the same on Cloudflare).
 import http from 'node:http';
@@ -35,11 +35,11 @@ function send(res, status, body) {
   res.end(body);
 }
 
-/** Relay a GEPS file or directory listing from dd.weather.gc.ca, passing Range through. */
+/** Relay a GEPS/GDPS file or directory listing from dd.weather.gc.ca, passing Range through. */
 function proxyMsc(req, res, rest) {
   if (rest === 'ping') return send(res, 200, 'ok');
   const upstream = mscPath(rest);
-  if (!upstream) return send(res, 403, 'only GEPS raw files are relayed');
+  if (!upstream) return send(res, 403, 'only GEPS and GDPS files are relayed');
   const headers = req.headers.range ? { Range: req.headers.range } : {};
   https
     .get(`${MSC_ORIGIN}/${upstream}`, { headers }, (up) => {

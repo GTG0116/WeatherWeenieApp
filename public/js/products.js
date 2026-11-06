@@ -2,13 +2,15 @@
 // into a displayable field (canonical units), plus styling.
 import {
   ANOMALY_C, CAPE, CIN, CLOUD, Colormap, DCAPE, DEWPOINT_C, FZRA_MM, HEIGHT_GRADIENT, LAPSE, LCL_M, LIGHTNING, PRECIP_ROWS,
-  QPF_MM, REFLECTIVITY_DBZ, SLEET_CM, SNOW_CM, SRH, STP, TEMP_C, TEMP_GRADIENT, VORT_E5, WIND_SFC_MS, WIND_SHEAR_MS,
-  WIND_UPPER_MS, spread,
+  PROB_PCT, QPF_MM, REFLECTIVITY_DBZ, SLEET_CM, SNOW_CM, SRH, STP, TEMP_C, TEMP_GRADIENT, VIS_M, VORT_E5, WIND_SFC_MS,
+  WIND_SHEAR_MS, WIND_UPPER_MS, spread,
 } from './colormaps.js';
 import { climatologyField } from './climatology.js';
 import { KINDS } from './accum.js';
-import { MODELS, supports } from './models.js';
+import { MODELS, ensembleMembers, supports } from './models.js';
 import { lclHeight, stp } from './thermo.js';
+import { PTYPE_CATEGORY, PTYPE_NAMES } from './ptype.js';
+import { PROB_KINDS, probParam } from './probability.js';
 
 const PARCELS = { sb: 'Surface-based', ml: 'Mixed-layer', mu: 'Most-unstable' };
 const PARCEL_OPTIONS = [
@@ -69,9 +71,26 @@ const fhour = (h) => 'F' + String(h).padStart(3, '0');
 
 const QPF_HOURS = [1, 3, 6, 12, 24, 48, 72];
 
-// ECMWF ptype (code table 4.201) → display category: 1 rain, 2 snow, 3 mix, 4 freezing
-export const PTYPE_CATEGORY = [0, 1, 1, 4, 3, 2, 2, 3, 3, 3, 3, 1, 4];
-export const PTYPE_NAMES = ['None', 'Rain', 'Snow', 'Mix / sleet', 'Freezing rain'];
+/**
+ * Why a precipitation total since F000 (or over the past `hours`) can't be shown at
+ * a step, or null. Interval totals need the step `hours` earlier to be published
+ * too, and a model with `totalAt` (NBM) only has totals at some steps.
+ */
+function totalsCheck(hours, step, run, model) {
+  const at = MODELS[model]?.totalAt;
+  if (at && !at(step, run.hour)) return `${MODELS[model].name} has no total ending at ${fhour(step)}: past 48 h its amounts are 6-hourly`;
+  if (!hours) return null;
+  if (step < hours) return `${hours}-hour totals start at ${fhour(hours)}`;
+  if (step === hours) return null; // totals are zero at F000
+  if (at && !at(step - hours, run.hour)) return `No ${hours}-hour total at ${fhour(step)}: past 48 h ${MODELS[model].name} totals are 6-hourly`;
+  if (run.steps.includes(step - hours)) return null;
+  if (run.expected.includes(step - hours)) return `${fhour(step - hours)} isn't published yet, so no ${hours}-hour total`;
+  const gap = step - Math.max(...run.expected.filter((s) => s < step));
+  return `No ${hours}-hour total at ${fhour(step)}: steps are ${gap}-hourly here`;
+}
+const totalsOnly = (opt, step, run, model) => totalsCheck(0, step, run, model);
+
+export { PTYPE_CATEGORY, PTYPE_NAMES };
 
 export const PRODUCTS = [
   // ---------------------------------------------------------------- upper air
@@ -365,6 +384,22 @@ export const PRODUCTS = [
     format: fmtInt,
     legendTicks: () => [10, 20, 30, 40, 50, 60, 70],
   },
+  {
+    id: 'vis',
+    group: 'surface',
+    name: 'Visibility',
+    title: () => 'Surface visibility',
+    unit: 'vis',
+    inputs: () => ({ v: { param: 'vis' } }),
+    compute: (inp) => ({ field: inp.v.values }),
+    colormap: () => cm('vis', () => new Colormap(VIS_M)),
+    contourTheme: 'light',
+    lineTheme: 'light',
+    cityMax: 8047, // m (5 mi); good visibility gets no value
+    isobars: true,
+    format: (v) => (v < 1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : String(Math.round(v))),
+    legendTicks: (units) => (units === 'imperial' ? [0.25, 0.5, 1, 2, 3, 5, 7] : [0.4, 1, 2, 3, 5, 8, 11]),
+  },
 
   // ---------------------------------------------------------------- severe weather
   {
@@ -544,15 +579,7 @@ export const PRODUCTS = [
     optionsTitle: 'Period ',
     unit: 'ice',
     inputs: (opt) => (opt === 'total' ? { tp: { param: 'tp' } } : { tp: { param: 'tp' }, prev: { param: 'tp', stepOffset: -opt } }),
-    // Interval totals need the step `opt` hours earlier to be published too.
-    check: (opt, step, run) => {
-      if (opt === 'total') return null;
-      if (step < opt) return `${opt}-hour totals start at ${fhour(opt)}`;
-      if (step === opt || run.steps.includes(step - opt)) return null; // totals are zero at F000
-      if (run.expected.includes(step - opt)) return `${fhour(step - opt)} isn't published yet, so no ${opt}-hour total`;
-      const gap = step - Math.max(...run.expected.filter((s) => s < step));
-      return `No ${opt}-hour total at ${fhour(step)}: steps are ${gap}-hourly here`;
-    },
+    check: (opt, step, run, model) => totalsCheck(opt === 'total' ? 0 : opt, step, run, model),
     compute: (inp) => {
       const prev = inp.prev?.values;
       return { field: map(inp.tp.values, (x, i) => Math.max(0, x - (prev ? prev[i] : 0)) * 1000) }; // m -> mm
@@ -572,8 +599,12 @@ export const PRODUCTS = [
     id: 'snow10',
     group: 'winter',
     name: 'Snowfall (10:1)',
-    title: (opt, model) => `Total snowfall, 10:1 ratio${supports(model, 'sf') ? '' : ', snow share from precip type'}`,
+    title: (opt, model) =>
+      MODELS[model].notes?.sf
+        ? `Total snowfall (${MODELS[model].notes.sf})`
+        : `Total snowfall, 10:1 ratio${supports(model, 'sf') ? '' : ', snow share from precip type'}`,
     unit: 'snow',
+    check: totalsOnly,
     inputs: () => ({ sf: { param: 'sf' } }),
     compute: (inp) => ({ field: map(inp.sf.values, (x) => Math.max(0, x) * 1000) }), // m water -> cm snow
     // Models without a snowfall field: precipitation where the type is snow.
@@ -587,6 +618,7 @@ export const PRODUCTS = [
     name: 'Snowfall (Kuchera)',
     title: () => 'Total snowfall, Kuchera ratio',
     unit: 'snow',
+    check: totalsOnly,
     accumulation: 'kuchera',
     select: (acc) => acc.snow,
     ...snowStyle(),
@@ -597,6 +629,7 @@ export const PRODUCTS = [
     name: 'Freezing rain',
     title: (opt, model) => `Total freezing rain (liquid equivalent)${note(model, 'ptype')}`,
     unit: 'ice',
+    check: totalsOnly,
     accumulation: 'ptype',
     select: (acc) => acc.zr,
     cityMin: 0.25, // mm; hide trace amounts
@@ -613,6 +646,7 @@ export const PRODUCTS = [
     name: 'Sleet',
     title: (opt, model) => `Total sleet (3:1 depth)${note(model, 'ptype')}`,
     unit: 'snow',
+    check: totalsOnly,
     accumulation: 'ptype',
     select: (acc) => map(acc.ip, (x) => (x * 3) / 10), // mm liquid -> cm sleet at 3:1
     cityMin: 0.12, // cm
@@ -624,6 +658,115 @@ export const PRODUCTS = [
     legendTicks: (units) => (units === 'imperial' ? [0.05, 0.1, 0.25, 0.5, 1, 2] : [0.1, 0.25, 0.5, 1, 2.5, 5]),
   },
 ];
+
+// ---------------------------------------------------------------- ensemble probabilities
+const OPS = { '>=': '≥', '<=': '≤', '>': '>', '<': '<', '=': '' };
+const splitOption = (o) => {
+  const [, op, v] = /^(<=|>=|<|>|=)(.*)$/.exec(o);
+  return [op, Number(v)];
+};
+const trim = (x, digits) => String(Number(x.toFixed(digits)));
+// Threshold labels per kind, in display units: [pill label, phrase for the title].
+const PROB_LABELS = {
+  precip: (mm, units) => (units === 'imperial' ? `${trim(mm / 25.4, 2)}"` : `${mm < 1 ? trim(mm, 2) : mm < 10 ? trim(mm, 1) : Math.round(mm)} mm`),
+  snow: (cm, units) => (units === 'imperial' ? `${Math.round(cm / 2.54)}"` : `${cm < 10 ? trim(cm, 1) : Math.round(cm)} cm`),
+  temp: (c, units) => (units === 'imperial' ? `${Math.round((c * 9) / 5 + 32)}°F` : `${Math.round(c)}°C`),
+  tempC: (c) => `${Math.round(c)}°C`,
+  wind: (ms, units) => (units === 'imperial' ? `${Math.round(ms * 2.23694)} mph` : `${Math.round(ms * 3.6)} km/h`),
+  cape: (v) => `${v} J/kg`,
+  vis: (m, units) => (units === 'imperial' ? `${m < 1000 ? '¼' : Math.round(m / 1609.344)} mi` : `${trim(m / 1000, 1)} km`),
+  dbz: (v) => `${v} dBZ`,
+};
+const PTYPE_OPTION_NAMES = { 1: 'Rain', 2: 'Snow', 3: 'Mix / sleet', 4: 'Freezing rain' };
+
+/**
+ * A probability product: the share of an ensemble's members passing each of a
+ * kind's thresholds (see probability.js), shown for every ensemble whatever member is picked.
+ * @param {(phrase: string) => string} what title text around the threshold, e.g. (t) => `${t} of precipitation in 24 h`
+ */
+function probProduct({ id, kind, name, label, what, defaultOption, showOp = false, check }) {
+  const opLabel = (o, units) => {
+    const [op, v] = splitOption(o);
+    return kind === 'ptype' ? PTYPE_OPTION_NAMES[v] : `${showOp ? `${OPS[op]} ` : ''}${PROB_LABELS[label](v, units)}`;
+  };
+  const phrase = (o, units) => {
+    const [op, v] = splitOption(o);
+    return kind === 'ptype' ? PTYPE_OPTION_NAMES[v].toLowerCase() : `${OPS[op]} ${PROB_LABELS[label](v, units)}`;
+  };
+  return {
+    id,
+    group: 'prob',
+    name,
+    prob: true,
+    title: (opt, model, units) => `Chance of ${what(phrase(opt, units))} (${ensembleMembers(model).length} members)`,
+    options: PROB_KINDS[kind].thresholds.map((value) => ({ value, label: (units) => opLabel(value, units) })),
+    defaultOption,
+    optionsTitle: kind === 'ptype' ? 'Type ' : 'Threshold ',
+    unit: 'percent',
+    check,
+    inputs: (opt) => ({ p: { param: probParam(kind, opt) } }),
+    compute: (inp) => ({ field: inp.p.values }),
+    colormap: () => cm('prob', () => new Colormap(PROB_PCT)),
+    contourTheme: 'light',
+    lineTheme: 'light',
+    cityMin: 5,
+    format: fmtInt,
+    legendTicks: () => [10, 20, 30, 40, 50, 60, 70, 80, 90],
+  };
+}
+
+PRODUCTS.push(
+  probProduct({
+    id: 'pqpf6', kind: 'qpf6', name: '6 h precip', label: 'precip', defaultOption: '>=2.54',
+    what: (t) => `${t} of precipitation in 6 h`,
+    check: (opt, step, run, model) => totalsCheck(6, step, run, model),
+  }),
+  probProduct({
+    id: 'pqpf24', kind: 'qpf24', name: '24 h precip', label: 'precip', defaultOption: '>=12.7',
+    what: (t) => `${t} of precipitation in 24 h`,
+    check: (opt, step, run, model) => totalsCheck(24, step, run, model),
+  }),
+  probProduct({
+    id: 'pqpftot', kind: 'qpftot', name: 'Total precip', label: 'precip', defaultOption: '>=25.4',
+    what: (t) => `${t} of precipitation since F000`,
+  }),
+  probProduct({
+    id: 'psnow', kind: 'snow', name: 'Snowfall (10:1)', label: 'snow', defaultOption: '>=15.24',
+    what: (t) => `${t} of snow (10:1) since F000`,
+  }),
+  probProduct({
+    id: 'pptype', kind: 'ptype', name: 'Precip type', defaultOption: '=2',
+    what: (t) => `${t} (where precipitating)`,
+  }),
+  probProduct({
+    id: 'pt2m', kind: 't2m', name: '2 m temperature', label: 'temp', showOp: true, defaultOption: '<=0',
+    what: (t) => `2 m temperature ${t}`,
+  }),
+  probProduct({
+    id: 'pt850', kind: 't850', name: '850 hPa temp', label: 'tempC', showOp: true, defaultOption: '<=0',
+    what: (t) => `850 hPa temperature ${t}`,
+  }),
+  probProduct({
+    id: 'pwind', kind: 'wind10', name: 'Wind speed', label: 'wind', defaultOption: '>=13.41',
+    what: (t) => `10 m wind ${t}`,
+  }),
+  probProduct({
+    id: 'pgust', kind: 'gust', name: 'Wind gusts', label: 'wind', defaultOption: '>=17.88',
+    what: (t) => `10 m gusts ${t}`,
+  }),
+  probProduct({
+    id: 'pcape', kind: 'cape', name: 'CAPE', label: 'cape', defaultOption: '>=1000',
+    what: (t) => `CAPE ${t}`,
+  }),
+  probProduct({
+    id: 'pvis', kind: 'vis', name: 'Visibility', label: 'vis', showOp: true, defaultOption: '<1609',
+    what: (t) => `visibility ${t}`,
+  }),
+  probProduct({
+    id: 'prefc', kind: 'refc', name: 'Reflectivity', label: 'dbz', defaultOption: '>=40',
+    what: (t) => `composite reflectivity ${t}`,
+  }),
+);
 
 function snowStyle() {
   return {

@@ -142,6 +142,7 @@ export const NCEP_PARAMS = {
   rh2: { v: 'RH', l: '2 m above ground' },
   tprate: { v: 'PRATE', l: 'surface' },
   refc: { v: 'REFC', l: /^entire atmosphere/ },
+  vis: { v: 'VIS', l: 'surface' }, // m
   tcc: { v: 'TCDC', l: /^entire atmosphere/, scale: 0.01 },
   lcc: { v: 'LCDC', l: 'low cloud layer', scale: 0.01 },
   mcc: { v: 'MCDC', l: 'middle cloud layer', scale: 0.01 },
@@ -165,7 +166,8 @@ function parseIdx(text) {
     .filter(Boolean)
     .map((line) => {
       const f = line.split(':');
-      return { v: f[3], l: f[4], t: f[5], offset: Number(f[1]) };
+      // f[6..]: what else describes the message (NBM: "prob >0.254", "ens std dev"; GEFS: "ENS=+1")
+      return { v: f[3], l: f[4], t: f[5], x: f.slice(6).filter(Boolean).join(':'), offset: Number(f[1]) };
     });
   rows.forEach((r, i) => {
     const next = rows.slice(i + 1).find((n) => n.offset > r.offset);
@@ -193,6 +195,8 @@ const matches = (want, got) => (want instanceof RegExp ? want.test(got) : want =
  * @param {number[]} [cfg.profileLevels] extra levels read for soundings and cross sections
  * @param {string[]} cfg.params canonical params published
  * @param {object} [cfg.overrides] per-param changes to NCEP_PARAMS
+ * @param {string|RegExp} [cfg.extra] what an index row's trailing fields must be, unless a param says
+ *   (NBM: '' — its files also hold probabilities, percentiles and spreads of the same fields)
  * @param {{res: number, clip?: object}} [cfg.regrid] projected grids only
  */
 export function ncepSource(cfg) {
@@ -223,8 +227,10 @@ export function ncepSource(cfg) {
     const url = fileUrl(def, runId, step, member);
     const rows = await idx(url);
     const lvl = typeof def.l === 'function' ? def.l(level) : def.l;
-    const time = def.t ?? INST;
-    const row = rows.find((r) => r.v === def.v && matches(lvl, r.l) && time.test(r.t));
+    // A time can depend on the step (NBM's 1 h and 6 h buckets are in the same file).
+    const time = typeof def.t === 'function' ? def.t(step) : def.t ?? INST;
+    const extra = def.x ?? cfg.extra;
+    const row = rows.find((r) => r.v === def.v && matches(lvl, r.l) && time.test(r.t) && (extra == null || matches(extra, r.x)));
     if (!row) throw new Error(`${def.v} ${typeof lvl === 'string' ? lvl : ''} not in F${pad(step, 3)}`);
     return { url, range: [row.offset, row.end] };
   };
@@ -234,13 +240,25 @@ export function ncepSource(cfg) {
     has: (param, level) => !!defs[param] && (!defs[param].upper || levelsOf(param).includes(level)),
     zeroAtStart: (param) => !!defs[param]?.zeroAtStart,
     post: (param) => scaled(defs[param]?.scale),
+    /** The param decoded together with this one, if any (see DataSource.#raw). */
+    pairOf: (param) => {
+      const d = defs[param];
+      return d?.polar ? d.polar.pair : d?.pair && cfg.gridRelativeWinds ? d.pair : null;
+    },
     async job(runId, step, param, level, member = null) {
       if (!defs[param]) throw new Error(`${param} isn't published`);
       const def = defs[param];
       const main = await find(def, runId, step, level, member);
       const job = { kind: 'grib', ...main, regrid: cfg.regrid ?? null };
-      // Grid-relative winds need both components to rotate them.
-      if (def.pair && cfg.gridRelativeWinds) {
+      if (def.polar) {
+        // Wind as speed (this message) and direction: u and v are made on the native
+        // grid, before regridding, since direction can't be interpolated across north.
+        const dir = await find(defs[def.polar.dir], runId, step, level, member);
+        job.pair = { param: def.polar.pair, url: dir.url, range: dir.range };
+        job.polar = true;
+        job.isU = !!def.polar.u;
+      } else if (def.pair && cfg.gridRelativeWinds) {
+        // Grid-relative winds need both components to rotate them.
         const other = await find(defs[def.pair], runId, step, level, member);
         job.pair = { param: def.pair, url: other.url, range: other.range };
         job.isU = def.v === 'UGRD';
@@ -280,6 +298,9 @@ const PERCENT_CLOUD = new Set([1, 3, 4, 5]);
 // a few fields (MSLP, T 250/500/850, Z 300/500/1000, AIFS 2 m temperature); the
 // rest of an ensemble mean is still averaged locally from the members.
 const MEAN_FILES = [240, 360];
+// Names a param also goes by, depending on the step: ENS gusts are '10fg' to 90 h
+// and from 150 h, but '10fg3' (max over 3 h) in between.
+const ECMWF_ALT_NAMES = { '10fg': ['10fg3', '10fg6'] };
 const MEAN_RECHECK = 10 * 60e3; // look for the files again this often while they're missing
 
 /**
@@ -369,7 +390,8 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
     // Runs that stop short of the file's step (IFS ENS 06/18 UTC, 144 h) have no 'ep' files.
     if (!publishedMean || file == null || !steps(Number(runId.slice(8, 10))).includes(file)) return null;
     const list = await meanIndex(runId, file);
-    return list?.find((x) => x.step === step && x.param === src && x.levtype === levtype && (level ? x.level === String(level) : true)) ?? null;
+    const names = [src, ...(ECMWF_ALT_NAMES[src] ?? [])];
+    return list?.find((x) => x.step === step && names.includes(x.param) && x.levtype === levtype && (level ? x.level === String(level) : true)) ?? null;
   };
   return {
     levels,
@@ -392,7 +414,8 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
         if (em) return gribJob(runId, step, em);
       }
       const entries = await index(runId, step);
-      const all = entries.filter((x) => x.param === src && x.levtype === levtype && (level ? x.level === String(level) : true));
+      const names = [src, ...(ECMWF_ALT_NAMES[src] ?? [])];
+      const all = entries.filter((x) => names.includes(x.param) && x.levtype === levtype && (level ? x.level === String(level) : true));
       const what = `${param}${level ? ' @' + level : ''}`;
       if (member === 'mean') {
         if (!all.length) throw new Error(`${what} not in step ${step}`);
@@ -420,49 +443,69 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
 }
 
 // ---------------------------------------------------------------------------
-// Canadian GEPS from the MSC Datamart. dd.weather.gc.ca sends no CORS headers,
-// so requests go through a same-origin proxy (server/server.js locally,
-// worker/index.js on Cloudflare). Each file holds one variable for
-// all 21 members, JPEG 2000 packed.
+// Canadian GEPS and GDPS from the MSC Datamart. dd.weather.gc.ca sends no CORS
+// headers, so requests go through a same-origin proxy (server/server.js locally,
+// worker/index.js on Cloudflare). Every field is a file of its own: GEPS files
+// hold one variable for all 21 members (JPEG 2000 packed), GDPS files one field.
 
 const MSC_PROXY = 'proxy/msc';
+let mscProxyOk = null;
+// Absolute, since the decode workers resolve relative URLs against their own script.
+const mscProxy = () => new URL(MSC_PROXY, document.baseURI).href;
+const checkMscProxy = () =>
+  (mscProxyOk ??= fetch(`${mscProxy()}/ping`)
+    .then(async (res) => res.ok && (await res.text()).trim() === 'ok')
+    .catch(() => false));
+
+/** Where each MSC model's files are: the run's directory and a field's file name in it. */
+const MSC_LAYOUTS = {
+  geps: {
+    dir: (date, hh) => `${date}/WXO-DD/ensemble/geps/grib2/raw/${hh}`,
+    file: (runId, f, v, l) => `${f}/CMC_geps-raw_${v}_${l}_latlon0p5x0p5_${runId}_P${f}_allmbrs.grib2`,
+    allMembers: true,
+  },
+  gdps: {
+    dir: (date, hh) => `${date}/WXO-DD/model_gdps/15km/${hh}`,
+    file: (runId, f, v, l) => `${f}/${runId.slice(0, 8)}T${runId.slice(8, 10)}Z_MSC_GDPS_${v}_${l}_LatLon0.15_PT${f}H.grib2`,
+    allMembers: false,
+  },
+};
 
 /**
  * @param {object} cfg
- * @param {Record<string, {v: string, l: string|((level: number) => string), upper?: boolean, scale?: number, zeroAtStart?: boolean}>} cfg.params
+ * @param {'geps'|'gdps'} [cfg.model]
+ * @param {Record<string, {v: string, l: string|((level: number) => string), upper?: boolean, scale?: number,
+ *   f?: (values: Float32Array) => void, zeroAtStart?: boolean}>} cfg.params
+ * @param {number[]} [cfg.profileLevels] extra levels read for soundings and cross sections
  */
-export function mscSource({ steps, levels, paramLevels = {}, params }) {
+export function mscSource({ model = 'geps', steps, levels, paramLevels = {}, profileLevels = [], params }) {
   const runCache = new Map();
-  let proxyOk = null;
-  // Absolute, since the decode workers resolve relative URLs against their own script.
-  const proxy = () => new URL(MSC_PROXY, document.baseURI).href;
-  const rawDir = (date, hh) => `${proxy()}/${date}/WXO-DD/ensemble/geps/grib2/raw/${hh}`;
-  const levelsOf = (param) => paramLevels[param] ?? levels;
-  const checkProxy = () =>
-    (proxyOk ??= fetch(`${proxy()}/ping`)
-      .then(async (res) => res.ok && (await res.text()).trim() === 'ok')
-      .catch(() => false));
+  const layout = MSC_LAYOUTS[model];
+  const runDir = (date, hh) => `${mscProxy()}/${layout.dir(date, hh)}`;
+  // A param with its own levels publishes exactly those (GDPS vorticity); the rest also have the sounding levels.
+  const levelsOf = (param) => paramLevels[param] ?? [...levels, ...profileLevels];
   return {
     levels,
+    // GEPS: one download holds every member (see DataSource.#raw).
+    allMembers: layout.allMembers,
     has: (param, level) => !!params[param] && (!params[param].upper || levelsOf(param).includes(level)),
     zeroAtStart: (param) => !!params[param]?.zeroAtStart,
-    post: (param) => scaled(params[param]?.scale),
-    async job(runId, step, param, level, member = 'mean') {
+    post: (param) => params[param]?.f ?? scaled(params[param]?.scale),
+    async job(runId, step, param, level, member = layout.allMembers ? 'mean' : null) {
       const p = params[param];
-      const date = runId.slice(0, 8);
-      const hh = runId.slice(8, 10);
+      if (!p) throw new Error(`${param} isn't published`);
       const lvl = typeof p.l === 'function' ? p.l(level) : p.l;
       const f = pad(step, 3);
       return {
         kind: 'grib',
-        url: `${rawDir(date, hh)}/${f}/CMC_geps-raw_${p.v}_${lvl}_latlon0p5x0p5_${runId}_P${f}_allmbrs.grib2`,
-        range: null, // no index files: the whole file (all members) is read
-        member: member === 'mean' ? 'mean' : Number(member ?? 0),
+        url: `${runDir(runId.slice(0, 8), runId.slice(8, 10))}/${layout.file(runId, f, p.v, lvl)}`,
+        range: null, // no index files: the whole file is read
+        member: !layout.allMembers ? null : member === 'mean' ? 'mean' : Number(member ?? 0),
       };
     },
     async runs() {
-      if (!(await checkProxy())) {
-        throw new Error('GEPS needs the small MSC proxy (dd.weather.gc.ca has no CORS): run it with npm start or deploy on Cloudflare Pages');
+      if (!(await checkMscProxy())) {
+        throw new Error(`${model.toUpperCase()} needs the small MSC proxy (dd.weather.gc.ca has no CORS): run it with npm start or deploy on Cloudflare Pages`);
       }
       return discoverRuns({
         cycle: 12,
@@ -471,7 +514,7 @@ export function mscSource({ steps, levels, paramLevels = {}, params }) {
         expected: steps,
         cache: runCache,
         stepsOf: async (run) => {
-          const res = await fetchRetry(`${rawDir(run.date, run.hh)}/`);
+          const res = await fetchRetry(`${runDir(run.date, run.hh)}/`);
           if (!res.ok) return [];
           return [...(await res.text()).matchAll(/href="(\d{3})\/"/g)].map((m) => Number(m[1]));
         },

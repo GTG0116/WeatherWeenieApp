@@ -4,7 +4,7 @@ A weather model viewer on a custom WebGL globe. It runs entirely in the browser:
 data is fetched straight from public cloud buckets and every GRIB2 field is decoded on
 your machine with the app's own JavaScript decoder. There's no tile service or build
 step, so the `public/` folder can be hosted as-is on GitHub Pages, Cloudflare Pages or any
-static host. (The one exception is GEPS, which needs a tiny proxy; see below.)
+static host. (The one exception is Canada's GEPS and GDPS, which need a tiny proxy; see below.)
 
 ## Models
 
@@ -15,9 +15,11 @@ static host. (The one exception is GEPS, which needs a tiny proxy; see below.)
 | GFS | Global 0.25° | hourly to 120 h, 3-hourly to 384 h | NOAA `noaa-gfs-bdp-pds` |
 | AIGFS (NOAA's AI GFS) | Global 0.25° | 6-hourly to 384 h | NOAA `noaa-nws-graphcastgfs-pds` |
 | DWD ICON | Global (Open-Meteo lat/lon grid) | hourly to 78 h, 3-hourly to 180 h | Open-Meteo `openmeteo` bucket |
+| CMC GDPS | Global 0.15° | 3-hourly to 240 h (00/12 UTC) | MSC Datamart, via a small proxy |
 | HRRR | CONUS 3 km | hourly to 18 h (48 h at 00/06/12/18 UTC) | NOAA `noaa-hrrr-bdp-pds` |
 | RRFS | CONUS 3 km | hourly runs: full output every 3 h (to 84 h at 00/06/12/18 UTC, 18 h at 03/09/15/21 UTC), surface fields only to 18 h in between | NOAA `noaa-rrfs-ops-pds` |
 | RAP | North America 13 km | hourly to 21 h (51 h at 03/09/15/21 UTC) | NOAA `noaa-rap-pds` |
+| NBM (National Blend of Models) | CONUS 2.5 km | hourly runs, each hourly to 48 h, then every 3-hourly valid time to 192 h and every 6-hourly one to 264 h | NOAA `noaa-nbm-grib2-pds` |
 
 ### Ensembles
 
@@ -50,6 +52,26 @@ ensemble mean: every pressure level from 1000 to 250 hPa, 0–1 km helicity, 0�
 gusts, lightning and DCAPE. So a single REFS member has soundings and cross sections, and the
 product list follows the member picked.
 
+**GDPS** files are one field each (`model_gdps/15km`, MSC's new `…_MSC_GDPS_<Var>_<Level>_LatLon0.15_PT<hhh>H`
+names). It publishes every hour to 240 h, but the hours between the 3-hourly steps carry only
+about 70 surface fields, so it's read 3-hourly. Its CAPE and CIN use a JPEG 2000 option the
+decoder doesn't support, so they aren't offered. Its instantaneous precip type codes (1 rain,
+2 rain/snow, 3 freezing rain, 4 ice pellets, 5 snow, 6 none) are mapped to WMO table 4.201.
+
+**NBM** files (`blend.YYYYMMDD/HH/core/…co.grib2`) also carry the blend's own probabilities,
+percentiles and spreads of the same fields; only the plain ones are read. Its grid is scanned
+boustrophedonically (every other row runs backwards, GRIB scan flag 0x10), which the decoder
+turns round. Every hourly run goes out to 264 h: hourly to 48 h, then the hours whose valid
+time is a multiple of 3 h (to 192 h) or 6 h (to 264 h); the hours in between carry
+precipitation only and aren't listed. Wind comes as speed and direction, turned into u/v in
+the decode worker on NBM's own grid before regridding (direction can't be interpolated across
+north); the precipitation rate is the past hour's amount. Precipitation and snowfall come as
+1-hour amounts (every step) and 6-hour amounts (at 6-hourly valid times), which are added up
+into run totals. Past 48 h the steps between the 6-hour amounts have no run total, so QPF and
+winter totals say so there. NBM's snowfall uses its own snow-to-liquid ratios (shown on the 10:1 snowfall map), and
+its precip type is the most likely of its four type probabilities. NBM has no MSLP or upper
+air, so no isobars or soundings.
+
 RRFS runs every hour, but only the 00/03/06/…/21 UTC cycles publish full output
 (`2dfld` + `prslev`). The cycles in between publish only the sub-hourly surface files
 (`2dfld.subh`, F001–F018), so they're listed as "surface only": temperature, dewpoint, wind,
@@ -61,11 +83,12 @@ All of these buckets send CORS headers and accept HTTP range requests, which is 
 a static page read them directly. ICON comes from Open-Meteo's copy because DWD's own
 server doesn't allow cross-origin requests.
 
-GEPS is the one model the browser can't fetch directly: Canada's `dd.weather.gc.ca` sends
-no CORS headers, so the app relays it through a same-origin proxy that passes only GEPS raw
-files (`server/server.js` locally, `worker/index.js` on Cloudflare Workers,
-`functions/proxy/msc` on Cloudflare Pages). GitHub Pages can't run the proxy, so there GEPS
-shows a message instead of loading.
+GEPS and GDPS are the models the browser can't fetch directly: Canada's `dd.weather.gc.ca`
+sends no CORS headers, so the app relays them through a same-origin proxy that passes only
+GEPS raw and GDPS 15 km files (`server/server.js` locally, `worker/index.js` on Cloudflare
+Workers, `functions/proxy/msc` on Cloudflare Pages; the allowed paths are in
+`lib/msc-paths.js`). GitHub Pages can't run the proxy, so there GEPS and GDPS show a message
+instead of loading.
 
 ## Products
 
@@ -78,6 +101,34 @@ shows a message instead of loading.
 | Temperature anomaly vs 1991–2020 + heights | Precip rate + type | | |
 | Height anomaly vs 1991–2020 + heights | Cloud cover (total / low / mid / high) | | |
 | Wind shear: sfc–500, sfc–700, 850–200 hPa | Simulated composite reflectivity | | |
+| | Visibility (GFS, HRRR, RAP, RRFS, REFS, NBM) | | |
+
+### Ensemble probabilities
+
+With an ensemble selected (GEFS, ENS, AIFS ENS, GEPS, REFS), a **Probabilities** section
+lists the chance of an event: the share of the members (control included) in which it happens,
+counted here member by member. The member picker steps aside while one is shown.
+
+| Product | Thresholds | Models |
+| --- | --- | --- |
+| 6 h, 24 h and run-total precipitation | 0.01–4 in | all |
+| Snowfall since F000, 10:1 | 1, 2, 4, 6, 12, 18 in | GEFS, ENS, AIFS ENS, GEPS |
+| Precip type, where precipitating ≥ 0.1 mm/h | rain, snow, mix / sleet, freezing rain | all |
+| 2 m temperature | ≤ 0 °F, ≤ 32 °F, ≥ 80 °F, ≥ 90 °F, ≥ 100 °F | all |
+| 850 hPa temperature | ≤ −10, ≤ 0, ≥ 10, ≥ 20 °C | all |
+| 10 m wind speed / gusts | 20–50 mph / 30–75 mph | all / ENS, REFS |
+| CAPE (most-unstable where published, else surface-based) | 250–3000 J/kg | GEFS, ENS, GEPS, REFS |
+| Visibility | < ¼, 1, 3, 5 mi | REFS |
+| Composite reflectivity | ≥ 20, 30, 40, 50 dBZ | REFS |
+
+Each member's fields are loaded just as when that member is picked (so derived fields like
+GEFS run totals from its 6-hour buckets, or AIFS ENS precip type from the temperature profile,
+work the same), counted in batches of 8, and dropped again; GEFS bucket totals near the hour
+are kept, since the next hours build on them. GEPS files hold all 21 members, so each is
+downloaded once per field. For the hour on screen every threshold is counted in the same pass,
+so switching thresholds there is instant. Finished probabilities are kept in IndexedDB with the
+ensemble means. GEFS snowfall comes from each 6-hour bucket times the share of it flagged as
+snow. The code is in `public/js/probability.js` and `DataSource.#probability` (`data.js`).
 
 ### Severe weather
 
@@ -144,14 +195,16 @@ after 120 h, AIGFS is 6-hourly), the app says so instead of drawing something mi
 GEFS (6-hour buckets) and REFS (1-hour buckets) publish precipitation that restarts every
 bucket; their run totals are built by adding the buckets up.
 
-**Locally derived fields**, where a model doesn't publish one:
-* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles); from absolute vorticity for the
-  NCEP deterministic models
+**Locally derived fields**, only where a model doesn't publish one (a published field always
+wins over a recipe of the same name):
+* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles, GDPS away from the 200/250/500/700/850
+  hPa levels it publishes); from absolute vorticity for the NCEP deterministic models
 * precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS),
   NCEP's categorical rain/snow/sleet/freezing-rain flags (GFS, HRRR, RRFS, RAP, GEFS, REFS),
   or the weather code (ICON)
-* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEFS,
-  GEPS), or from the 1-hour bucket (REFS)
+* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEPS), or the
+  mean over the latest 3–6 h bucket (GEFS). REFS and NBM rates are their published 1-hour
+  amounts, read as rates.
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
 * snowfall for models without a snowfall field: precipitation × snow share from precip type
@@ -334,7 +387,8 @@ public buckets ──HTTP range request──▶ Web Worker pool                
   using the byte offsets in the run's index file (`.idx` for NOAA, `.index` for ECMWF).
 * **Projected grids.** HRRR and RRFS (Lambert conformal) and RAP (rotated lat/lon) are
   regridded in the worker onto a regular lat/lon grid (0.03° for 3 km, 0.12° for RAP), and
-  their grid-relative winds are rotated to true north. The mapping is computed once per
+  their grid-relative winds are rotated to true north. Both wind components come from one decode job, however
+  many requests for either arrive while it runs. The mapping is computed once per
   grid and reused. Outside a regional domain the globe shows the base map.
 * **Decoding** lives in `public/js/decode/` (`grib2.js`, `aec.js`, `jpx.js`, `regrid.js`);
   ICON uses Open-Meteo's WebAssembly reader, loaded only when ICON is selected. `jpx.js`
@@ -351,9 +405,15 @@ public buckets ──HTTP range request──▶ Web Worker pool                
   does run discovery and builds the download jobs.
 * **Whole-run loops.** Once a frame is drawn, every other forecast hour of the run is
   loaded for the current product, level and member (nearest-ahead first), and the timeline
-  ticks fill in as frames arrive. Decoded fields are stored as 16-bit values in an
-  in-memory LRU of 1–2.5 GB depending on the device: enough for a full run of most
-  products. If a run doesn't fit, loading stops at the limit and the status says so.
+  ticks fill in as frames arrive. Decoded fields are stored as 16-bit values (8-bit for
+  precip type and probabilities, which lose nothing that way), keeping only the part of
+  each row that has data, so a regional grid's empty corners cost nothing. They live in an
+  in-memory LRU of 1–2.5 GB depending on the device. Fields read only to compute another
+  (NBM's wind speed and direction, the four precip-type flags or probabilities, a recipe's
+  inputs, every ensemble member behind a probability) are decoded, used and dropped without
+  being cached, so a frame keeps only what's drawn: an NBM precip-type frame is 2 fields
+  instead of 7, and a whole NBM run of it fits in under 1 GB. If a run doesn't fit, loading
+  stops at the limit and the status says so.
 * **Only the view on screen stays in memory.** Memory holds the whole run of the one
   product being viewed (for the selected model, run and member, with whatever its fields
   are computed from) and nothing else. Changing product, level, model, run or member drops
@@ -397,7 +457,7 @@ npm start
 ```
 
 Then open http://localhost:8642 (set `PORT` to change it). The local server also runs the
-GEPS proxy. No `npm install` is needed;
+GEPS/GDPS proxy. No `npm install` is needed;
 `three` is only a dev dependency for re-vendoring (see `public/vendor/README.md`).
 
 ## Publish on GitHub Pages

@@ -259,6 +259,12 @@ function unpack(data, st, limit = Infinity) {
     const x = packed ? packed[k++] : 0;
     values[i] = (ref + x * bscale) * dscale;
   }
+  // Boustrophedonic scanning (flag 0x10, e.g. NBM): every other row runs the
+  // opposite way. Turn those rows round so all rows run in the first row's direction.
+  if (grid.scan & 0x10) {
+    const ni = grid.ni;
+    for (let row = 1; row * ni < end; row += 2) values.subarray(row * ni, (row + 1) * ni).reverse();
+  }
   return values;
 }
 

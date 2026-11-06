@@ -243,6 +243,19 @@ export const QPF_MM = [
   [6 * INCH, '#d38be8'], [10 * INCH, '#f5ddff'],
 ];
 
+// Surface visibility, m: the lower, the stronger (1/4, 1, 2, 3, 5 and 7 mi stops)
+export const VIS_M = [
+  [0, '#5a0a5e', 1], [402, '#b0158f', 1], [805, '#d81b4a'], [1609, '#ee6a22'], [3219, '#f2c12e'],
+  [4828, '#8fd14f', 0.85], [8047, '#4fb3a6', 0.55], [11265, '#8fc3dc', 0.25], [16000, '#d8e8f2', 0],
+];
+
+// Ensemble probability, %
+export const PROB_PCT = [
+  [0, '#9fd4ee', 0], [5, '#9fd4ee', 0], [10, '#7cc3ea', 0.8], [20, '#3f9be0', 0.92], [30, '#2b6fc4', 1],
+  [40, '#2fae4a'], [50, '#a8d84a'], [60, '#f1d84a'], [70, '#f39a30'], [80, '#e2472b'], [90, '#b81d48'],
+  [100, '#8e1a8c'],
+];
+
 // Simulated composite reflectivity, dBZ
 export const REFLECTIVITY_DBZ = [
   [5, '#5fb3d9', 0], [10, '#4aa3d6', 0.6], [15, '#1e6fd0', 0.85], [20, '#16c437', 0.95], [25, '#0f9e2c', 1],

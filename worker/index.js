@@ -1,6 +1,6 @@
 // Cloudflare Worker entry point (`wrangler deploy`). The site itself is the static
 // public/ folder, served by Workers static assets; this script only runs for
-// /proxy/* (see run_worker_first in wrangler.toml), which relays GEPS files.
+// /proxy/* (see run_worker_first in wrangler.toml), which relays GEPS and GDPS files.
 import { proxyMsc } from '../lib/msc-proxy.js';
 
 const PREFIX = '/proxy/msc/';
