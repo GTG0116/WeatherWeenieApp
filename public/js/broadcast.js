@@ -48,9 +48,14 @@ export class Broadcast {
    * @param {object} settings see DEFAULT_BROADCAST (persisted by the app)
    * @param {Function} onSettings called after a settings change
    */
-  constructor(settings, onSettings) {
+  /**
+   * @param {Function} [outputSize] () => {w, h} of the picture the map stands for (the
+   *   size picked in Settings › Size), or null when the map is the whole window
+   */
+  constructor(settings, onSettings, outputSize) {
     this.settings = settings;
     this.onSettings = onSettings;
+    this.outputSize = outputSize;
     this.info = { product: '', sub: '', time: null, legend: null };
     this.el = document.createElement('div');
     this.el.id = 'broadcast';
@@ -149,15 +154,28 @@ export class Broadcast {
     this.#fit();
   }
 
-  /** Scale the whole graphic: the chosen size, shrunk to fit narrow screens. */
+  /**
+   * Scale the whole graphic to the map: it's designed for a 1920 × 1080 picture,
+   * so at 100% it takes the same share of an Instagram post, a story or a
+   * YouTube frame (fewer pixels on a smaller picture), however big the map
+   * shows on screen. It's shrunk further only if it wouldn't fit.
+   */
   #fit() {
     if (this.el.hidden) return;
-    this.el.style.setProperty('--bc-scale', 1);
-    const natural = this.el.scrollWidth;
-    const room = (this.el.parentElement?.clientWidth || window.innerWidth) - this.el.offsetLeft - 12;
-    const k = Math.min(this.settings.scale, room / Math.max(1, natural));
-    this.el.style.setProperty('--bc-scale', k.toFixed(3));
     this.fitTitle();
+    this.el.style.setProperty('--bc-scale', 1);
+    const stage = this.el.parentElement;
+    const cssW = stage?.clientWidth || window.innerWidth;
+    const cssH = stage?.clientHeight || window.innerHeight;
+    const out = this.outputSize?.() ?? { w: cssW, h: cssH };
+    const design = Math.min(out.w / 1920, out.h / 1080); // picture px per design px
+    const unit = design * (cssW / out.w); // CSS px per design px
+    const inset = Math.max(6, Math.round(30 * unit));
+    this.el.style.setProperty('--bc-inset', `${inset}px`);
+    const natural = this.el.scrollWidth;
+    const room = cssW - this.el.offsetLeft - inset;
+    const k = Math.min(this.settings.scale * unit, room / Math.max(1, natural));
+    this.el.style.setProperty('--bc-scale', k.toFixed(4));
   }
 
   /** Very long product names get a smaller title instead of a giant band. */
@@ -195,7 +213,7 @@ export class Broadcast {
         ${s.logo ? '<button class="mini-btn" data-act="logo-reset">Reset</button>' : ''}
       </div>
       <input type="file" accept="image/*" data-act="logo-file" hidden />
-      <label class="slider-row"><span>Size</span><output>${Math.round(s.scale * 100)}%</output><input type="range" min="0.4" max="1.4" step="0.05" value="${s.scale}" data-act="scale" /></label>
+      <label class="slider-row"><span>Size <span class="sub-inline">· follows the map size</span></span><output>${Math.round(s.scale * 100)}%</output><input type="range" min="0.4" max="1.4" step="0.05" value="${s.scale}" data-act="scale" /></label>
       <div class="toggle${s.showDate ? ' on' : ''}" data-act="showDate"><span>Date with the weekday<span class="sub">e.g. THU NOV 5 8:53 pm</span></span><span class="switch"></span></div>
       <div class="toggle${s.showLegend ? ' on' : ''}" data-act="showLegend"><span>Colour key</span><span class="switch"></span></div>
       <div class="toggle${s.hideUi ? ' on' : ''}" data-act="hideUi"><span>Clean screen<span class="sub">Off: the app's controls stay usable. On: hidden (Esc or move the mouse to exit)</span></span><span class="switch"></span></div>

@@ -309,7 +309,10 @@ muxed with mp4-muxer; Chrome, Edge, Safari) or a looping GIF (gifenc), both at t
 Settings › Size (or the window at screen resolution), optionally scaled to 75% or 50%. Pick the
 frames (all, every 2nd/3rd, the latest scans, or click and shift-click), how long each one shows
 and how long to hold the last. The map is drawn again at the export's pixel ratio and the labels,
-broadcast graphic (or title and legend) are painted over it, so files match the screen.
+broadcast graphic (or title and legend) and an open alert popup with its arrow are painted over
+it, so files match the screen. The broadcast graphic is laid out for a 1920 × 1080 picture and
+scaled to the map size, so at 100% it takes the same share of a square post, a story or a
+YouTube frame.
 
 Radar **Resolution** (with the tilts) applies to every NEXRAD product: CC, ZDR and KDP switch to
 their Level III legacy products; reflectivity, velocity and spectrum width, whose legacy Level III

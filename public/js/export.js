@@ -112,6 +112,7 @@ class Painter {
     } else if (el.tagName === 'CANVAS') {
       ctx.drawImage(el, b.x, b.y, b.w, b.h);
     }
+    this.borders(cs, b, radius, scale);
     // The city dot is a ::after pseudo-element.
     if (el.classList.contains('city')) {
       ctx.beginPath();
@@ -123,10 +124,149 @@ class Painter {
       ctx.stroke();
     }
     ctx.restore();
+    // Rounded boxes that clip their content (the alert popup's coloured header).
+    const clip = cs.overflow === 'hidden' && radius > 0;
+    if (clip) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(b.x, b.y, b.w, b.h, radius);
+      ctx.clip();
+    }
     for (const n of el.childNodes) {
-      if (n.nodeType === 1 && n.tagName !== 'svg' && n.tagName !== 'INPUT') this.element(n, alpha);
+      if (n.nodeType === 1 && n.tagName === 'svg') this.svg(n, alpha);
+      else if (n.nodeType === 1 && n.tagName !== 'INPUT' && !n.classList.contains('ap-close')) this.element(n, alpha);
       else if (n.nodeType === 3 && n.textContent.trim()) this.text(n, cs, scale, alpha);
     }
+    if (clip) {
+      ctx.restore();
+      // the border again, over the clipped children
+      this.borders(cs, b, radius, scale);
+    }
+  }
+
+  /** CSS borders: one rounded stroke when all four match, else each side on its own. */
+  borders(cs, b, radius, scale) {
+    const ctx = this.ctx;
+    const side = (s) => ({ w: parseFloat(cs[`border${s}Width`]) || 0, c: cs[`border${s}Color`], st: cs[`border${s}Style`] });
+    const sides = ['Top', 'Right', 'Bottom', 'Left'].map(side);
+    const vis = (x) => x.w > 0 && x.st !== 'none' && !transparent(x.c);
+    if (!sides.some(vis)) return;
+    ctx.save();
+    const k = scale * this.k;
+    const same = sides.every((x) => x.w === sides[0].w && x.c === sides[0].c && vis(x));
+    if (same) {
+      const w = sides[0].w * k;
+      ctx.strokeStyle = sides[0].c;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.roundRect(b.x + w / 2, b.y + w / 2, b.w - w, b.h - w, Math.max(0, radius - w / 2));
+      ctx.stroke();
+    } else {
+      const [t, r, bo, l] = sides;
+      const fill = (x, rx, ry, rw, rh) => {
+        if (!vis(x)) return;
+        ctx.fillStyle = x.c;
+        ctx.fillRect(rx, ry, rw, rh);
+      };
+      fill(t, b.x, b.y, b.w, t.w * k);
+      fill(bo, b.x, b.y + b.h - bo.w * k, b.w, bo.w * k);
+      fill(l, b.x, b.y, l.w * k, b.h);
+      fill(r, b.x + b.w - r.w * k, b.y, r.w * k, b.h);
+    }
+    ctx.restore();
+  }
+
+  /** Small inline icons: paths and circles, with currentColor and CSS variables resolved. */
+  svg(el, alpha) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none') return;
+    const b = this.box(el.getBoundingClientRect());
+    const vb = el.viewBox?.baseVal;
+    if (!vb || !vb.width || !b.w) return;
+    const ctx = this.ctx;
+    const sx = b.w / vb.width;
+    const sy = b.h / vb.height;
+    const paint = (v, node) => {
+      if (!v || v === 'none') return null;
+      if (v === 'currentColor') return cs.color;
+      const m = v.match(/^var\((--[\w-]+)\)$/);
+      return m ? getComputedStyle(node).getPropertyValue(m[1]).trim() || null : v;
+    };
+    ctx.save();
+    ctx.globalAlpha = alpha * Number(cs.opacity);
+    const f = cs.filter;
+    const sh = f && f.startsWith('drop-shadow(') ? parseShadow(f.slice(12, -1)) : null;
+    ctx.translate(b.x - vb.x * sx, b.y - vb.y * sy);
+    ctx.scale(sx, sy);
+    for (const n of el.querySelectorAll('path, circle')) {
+      const shape = new Path2D();
+      if (n.tagName === 'circle') shape.arc(+n.getAttribute('cx'), +n.getAttribute('cy'), +n.getAttribute('r'), 0, Math.PI * 2);
+      else shape.addPath(new Path2D(n.getAttribute('d')));
+      const fill = paint(n.getAttribute('fill') ?? (n.tagName === 'circle' ? null : 'black'), n);
+      const stroke = paint(n.getAttribute('stroke'), n);
+      if (sh) {
+        ctx.shadowColor = sh.color;
+        ctx.shadowBlur = sh.blur * this.k;
+      }
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill(shape);
+      }
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = +(n.getAttribute('stroke-width') ?? 1);
+        ctx.lineCap = n.getAttribute('stroke-linecap') ?? 'butt';
+        ctx.lineJoin = n.getAttribute('stroke-linejoin') ?? 'miter';
+        ctx.stroke(shape);
+      }
+    }
+    ctx.restore();
+  }
+
+  /** The alert popup's leader: a dark-edged white line ending in an arrowhead. */
+  leader(svg) {
+    if (!svg || svg.style.display === 'none') return;
+    const line = svg.querySelector('line');
+    if (!line) return;
+    const { origin: o, k } = this;
+    const x1 = (+line.getAttribute('x1') - o.left) * k;
+    const y1 = (+line.getAttribute('y1') - o.top) * k;
+    const x2 = (+line.getAttribute('x2') - o.left) * k;
+    const y2 = (+line.getAttribute('y2') - o.top) * k;
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return;
+    const ctx = this.ctx;
+    const a = Math.atan2(y2 - y1, x2 - x1);
+    const head = 11 * k;
+    const tip = (scale) => {
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - head * scale * Math.cos(a - 0.45), y2 - head * scale * Math.sin(a - 0.45));
+      ctx.lineTo(x2 - head * scale * Math.cos(a + 0.45), y2 - head * scale * Math.sin(a + 0.45));
+      ctx.closePath();
+    };
+    ctx.save();
+    ctx.lineCap = 'round';
+    const bx = x2 - head * 0.8 * Math.cos(a);
+    const by = y2 - head * 0.8 * Math.sin(a);
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 5 * k;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    tip(1.25);
+    ctx.fillStyle = '#111';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2.5 * k;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    tip(1);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.restore();
   }
 
   text(node, cs, scale, alpha) {
@@ -135,7 +275,10 @@ class Painter {
     const raw = node.textContent;
     const upper = cs.textTransform === 'uppercase';
     const pieces = [];
-    range.selectNodeContents(node);
+    // Measure only the visible characters: a leading space must keep its gap, not shift the text.
+    const lead = raw.length - raw.trimStart().length;
+    range.setStart(node, lead);
+    range.setEnd(node, raw.trimEnd().length);
     const rects = range.getClientRects();
     if (rects.length <= 1) pieces.push([raw.trim(), range.getBoundingClientRect()]);
     else {
@@ -214,6 +357,12 @@ export class Exporter {
     const kx = w / stage.width;
     const p = new Painter(ctx, stage, kx);
     for (const el of document.querySelectorAll('#labels .lbl:not(.hidden)')) p.element(el);
+    // An open alert popup, with its arrow to the spot.
+    const pop = document.getElementById('alert-popup');
+    if (pop && !pop.hidden && pop.style.visibility !== 'hidden') {
+      p.leader(document.getElementById('alert-leader'));
+      p.element(pop);
+    }
     if (this.broadcastOn()) {
       const bc = document.getElementById('broadcast');
       if (bc && !bc.hidden) p.element(bc);

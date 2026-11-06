@@ -506,8 +506,8 @@ input[type='color']::-webkit-color-swatch {
   --bc-titleBg: #f6f7f9;
   --bc-boxText: #fff;
   position: absolute;
-  top: 22px;
-  left: 22px;
+  top: var(--bc-inset, 22px);
+  left: var(--bc-left, var(--bc-inset, 22px));
   z-index: 30;
   display: grid;
   grid-template-columns: auto auto;
@@ -706,10 +706,6 @@ body.broadcast-no-timeline #timeline {
   box-shadow: 0 0 0 1px var(--accent);
 }
 @media (max-width: 760px) {
-  #broadcast {
-    top: 12px;
-    left: 12px;
-  }
   .ap-title {
     font-size: 23px;
   }
@@ -1083,4 +1079,9 @@ body.frame-outline #stage {
   height: 100%;
   background: var(--accent);
   transition: width 0.2s;
+}
+
+.sub-inline {
+  color: var(--faint);
+  font-size: 10.5px;
 }

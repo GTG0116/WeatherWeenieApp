@@ -168,7 +168,7 @@ const radar3d = new Radar3D({
 });
 
 // ------------------------------------------------------------------ broadcast & alerts
-const broadcast = new Broadcast(state.broadcast, persist);
+const broadcast = new Broadcast(state.broadcast, persist, () => frameSize(state.frame));
 const alerts = new AlertLayer({
   globe,
   settings: state.alerts,
@@ -1825,7 +1825,7 @@ function bindEvents() {
     const sr = $('#stage').getBoundingClientRect();
     const pr = $('#panel').getBoundingClientRect();
     const covered = window.innerWidth > 760 && !document.body.classList.contains('panel-hidden') && !document.body.classList.contains('broadcast-clean') && pr.right > sr.left + 4;
-    $('#broadcast').style.left = covered ? `${Math.round(pr.right - sr.left + 14)}px` : '';
+    $('#broadcast').style.setProperty('--bc-left', covered ? `${Math.round(pr.right - sr.left + 14)}px` : '');
     broadcast.refit();
   };
   relayout = syncOffset;
