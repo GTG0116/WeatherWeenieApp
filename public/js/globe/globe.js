@@ -156,6 +156,61 @@ const fragmentShader = /* glsl */ `
     return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
   }
 
+  // Catmull-Rom weights for the four samples around fraction t.
+  vec4 crWeights(float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return vec4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+  }
+
+  // Smoothed categorical lookup (precipitation type). Each category's 0/1 indicator is
+  // Catmull-Rom interpolated over the 4x4 neighbourhood and the strongest one wins, so
+  // boundaries follow smooth curves (a lone cell becomes a round blob, not a square).
+  // Returns (best row, runner-up row, best - runner-up score); the score gap falls to
+  // zero on a boundary, which the caller uses to anti-alias the edge.
+  vec3 typeRows(vec2 xy) {
+    vec2 f = floor(xy);
+    vec2 t = xy - f;
+    vec4 wx = crWeights(t.x);
+    vec4 wy = crWeights(t.y);
+    int ni = int(uSize.x);
+    int nj = int(uSize.y);
+    float rows[16];
+    float w[16];
+    for (int j = 0; j < 4; j++) {
+      int y = clamp(int(f.y) - 1 + j, 0, nj - 1);
+      for (int i = 0; i < 4; i++) {
+        int x = int(f.x) - 1 + i;
+        x = uRegional ? clamp(x, 0, ni - 1) : (x + ni) % ni;
+        rows[j * 4 + i] = texelFetch(uType, ivec2(x, y), 0).r;
+        w[j * 4 + i] = wx[i] * wy[j];
+      }
+    }
+    float best = rows[5];
+    float bestS = -1e9;
+    float second = rows[5];
+    float secondS = -1e9;
+    for (int k = 0; k < 16; k++) {
+      float r = rows[k];
+      bool seen = false;
+      for (int m = 0; m < k; m++) seen = seen || rows[m] == r;
+      if (seen) continue;
+      float s = 0.0;
+      for (int m = 0; m < 16; m++) s += rows[m] == r ? w[m] : 0.0;
+      if (s > bestS) {
+        second = best;
+        secondS = bestS;
+        best = r;
+        bestS = s;
+      } else if (s > secondS) {
+        second = r;
+        secondS = s;
+      }
+    }
+    if (secondS < -1e8) return vec3(best, best, 1.0);
+    return vec3(best, second, bestS - secondS);
+  }
+
   // Sweep value at a point: nearest gate along the great circle from the radar.
   float radarValue(vec3 p) {
     p = normalize(p);
@@ -240,17 +295,24 @@ const fragmentShader = /* glsl */ `
         t = (value - uDomain.x) / (uDomain.y - uDomain.x);
       }
       t = clamp(t, 0.0, 1.0);
-      float row = 0.0;
+      // Type rows: (best, runner-up, score gap); see typeRows.
+      vec3 tr = vec3(0.0, 0.0, 1.0);
       if (uHasType && uRadar) {
         // Radar: the type comes from a lat/lon grid (uGrid / uSize) under the sweep.
         vec2 txy = dataXY(ll);
-        row = txy.x < 0.0 ? uTypeOutside : texelFetch(uType, ivec2(floor(txy + 0.5)), 0).r;
+        tr = txy.x < 0.0 ? vec3(uTypeOutside, uTypeOutside, 1.0) : typeRows(txy);
       } else if (uHasType) {
-        ivec2 ixy = ivec2(int(mod(floor(xy.x + 0.5), uSize.x)), int(min(floor(xy.y + 0.5), uSize.y - 1.0)));
-        row = texelFetch(uType, ixy, 0).r;
+        tr = typeRows(xy);
       }
       float lutSize = float(${LUT_SIZE});
-      vec4 c = texture(uLut, vec2((t * (lutSize - 1.0) + 0.5) / lutSize, (row + 0.5) / uLutRows));
+      float lu = (t * (lutSize - 1.0) + 0.5) / lutSize;
+      vec4 c = texture(uLut, vec2(lu, (tr.x + 0.5) / uLutRows));
+      // Anti-alias the edge between types over about one screen pixel.
+      float aa = max(fwidth(tr.z), 1e-6);
+      if (tr.y != tr.x) {
+        vec4 c2 = texture(uLut, vec2(lu, (tr.y + 0.5) / uLutRows));
+        c = mix(c2, c, 0.5 + 0.5 * smoothstep(0.0, aa, tr.z));
+      }
       vec3 lit = c.rgb * (0.86 + 0.2 * diffuse);
       over(color, alpha, lit, c.a * uOpacity);
 

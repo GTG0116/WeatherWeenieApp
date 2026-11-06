@@ -659,6 +659,41 @@ export function sampleField(values, meta, lat, lon) {
   return top * (1 - fy) + bot * fy;
 }
 
+const crWeights = (t) => {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return [-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1, -1.5 * t3 + 2 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2];
+};
+
+/**
+ * Smoothed categorical sample (precipitation type), matching the map shader's typeRows:
+ * each category's indicator is Catmull-Rom interpolated over the 4x4 neighbourhood and
+ * the strongest category wins. NaN outside a regional grid.
+ */
+export function sampleCategory(values, meta, lat, lon) {
+  const pos = gridPos(meta, lat, lon);
+  if (!pos) return NaN;
+  const { ni, nj } = meta;
+  const fx = Math.floor(pos[0]);
+  const fy = Math.floor(pos[1]);
+  const wx = crWeights(pos[0] - fx);
+  const wy = crWeights(pos[1] - fy);
+  const score = new Map();
+  for (let j = 0; j < 4; j++) {
+    const y = Math.min(nj - 1, Math.max(0, fy - 1 + j));
+    for (let i = 0; i < 4; i++) {
+      let x = fx - 1 + i;
+      x = meta.regional ? Math.min(ni - 1, Math.max(0, x)) : (x + ni) % ni;
+      const r = values[y * ni + x];
+      score.set(r, (score.get(r) ?? 0) + wx[i] * wy[j]);
+    }
+  }
+  let best = NaN;
+  let bestS = -Infinity;
+  for (const [r, s] of score) if (s > bestS) [best, bestS] = [r, s];
+  return best;
+}
+
 /** Nearest-neighbour sample (for categorical fields). */
 export function sampleNearest(values, meta, lat, lon) {
   const pos = gridPos(meta, lat, lon);
