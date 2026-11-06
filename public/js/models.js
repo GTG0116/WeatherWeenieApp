@@ -5,7 +5,7 @@
 // srh1 srh3 ush6 vsh6 ltng dcape msl sp tp sf tprate ptype refc tcc lcc mcc hcc
 // (surface) and t gh u v vo r (pressure levels). Accumulations
 // (tp, sf) are metres of water since F000.
-import { ecmwfSource, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
+import { ecmwfSource, fetchRetry, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
 import {
   classifyPrecipType, dewpointFromRh, ptypeFromCategorical, ptypeFromWmo, relativeVorticity, vorticity,
 } from './derived.js';
@@ -70,6 +70,17 @@ const tpFromBuckets = (hours) => ({
   make: ({ b, prev }) => {
     const out = new Float32Array(b.values.length);
     for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) + (prev ? prev.values[i] : 0);
+    return out;
+  },
+});
+// 1-hour mean rate (kg m⁻² s⁻¹) from hourly files whose precipitation bucket
+// restarts every `hours` (WOOF-NAM 12 h): this hour's bucket less the last hour's.
+const tprateFromBuckets = (hours) => ({
+  zeroAtStart: true,
+  needs: (level, ctx) => ({ b: { param: 'apcp' }, ...(ctx.step % hours !== 1 ? { prev: { param: 'apcp', stepOffset: -1 } } : {}) }),
+  make: ({ b, prev }) => {
+    const out = new Float32Array(b.values.length);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i] - (prev ? prev.values[i] : 0)) * (1000 / 3600);
     return out;
   },
 });
@@ -215,6 +226,29 @@ const RRFS_HOURLY = ncepSource({
   gridRelativeWinds: true,
   regrid: { res: 0.03 },
 });
+
+// ---------------------------------------------------------------- WOOF-NAM
+// Recast's revival of the NAM 12 km (NCEP grid 218), in NOAA's awphys layout. There is
+// no bucket listing: status.json names the newest runs and the last forecast hour
+// ready in each (hours arrive in order). Runs before 06 UTC 5 Nov 2026 used an
+// earlier layout (no MSLET, gusts or cloud cover; precipitation since F000) and are skipped.
+const WOOF_NAM = 'https://woof-nam.recastsystems.com';
+const WOOF_NAM_LAYOUT = Date.UTC(2026, 10, 5, 6);
+let woofStatus = null;
+async function woofNamSteps(run) {
+  if (run.time < WOOF_NAM_LAYOUT) return [];
+  if (!woofStatus || Date.now() - woofStatus.at > 60e3) {
+    const p = fetchRetry(`${WOOF_NAM}/status.json`).then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status} for WOOF-NAM status.json`);
+      return res.json();
+    });
+    woofStatus = { at: Date.now(), p };
+    p.catch(() => (woofStatus = null));
+  }
+  const c = (await woofStatus.p).cycles?.find((x) => Date.parse(x.cycle) === run.time);
+  const last = Number(c?.hours_available);
+  return c && c.state !== 'skipped' && Number.isFinite(last) ? range(0, Math.min(last, 84), 1) : [];
+}
 
 /** A source that also lists another source's runs, tagged with the model view that reads them. */
 function withRuns(source, extra, view) {
@@ -596,6 +630,46 @@ export const MODELS = {
       regrid: { res: 0.12, clip: { south: 10, north: 75, west: -175, east: -45 } },
     }),
     derived: { vo: vortFromAbsv, ptype: ptypeCategorical, dcape: dcapeFrom(DCAPE_FINE) },
+    profile: PROFILE_HIRES,
+  },
+  woofnam: {
+    name: 'WOOF-NAM',
+    label: 'WOOF-NAM',
+    sub: 'N. America 12 km',
+    group: 'regional',
+    regional: true,
+    credit: 'WOOF-NAM by Recast (CC BY 4.0) · not an official NOAA/NWS forecast',
+    source: ncepSource({
+      bucket: WOOF_NAM,
+      files: { sfc: (r, s) => `woof-nam/12km/${r.date}/${r.hh}z/woof-nam.t${r.hh}z.awphys${p2(s)}.tm00.grib2` },
+      stepsOf: woofNamSteps,
+      cycle: 6,
+      search: 36,
+      maxRuns: 4,
+      steps: () => range(0, 84, 1),
+      // Every 25 hPa from 1000 to 50 hPa, all in the one file
+      levels: UPPER.slice(0, -1),
+      profileLevels: PROFILE_HIRES,
+      // No categorical precip type, lightning, low/mid/high cloud, 90 hPa mixed-layer
+      // parcel or 0–1 km helicity; absolute vorticity only on a few levels.
+      params: ['2t', '2d', '10u', '10v', '10fg', 'sbcape', 'mucape', 'sbcin', 'mucin', 'srh3', 'ush6', 'vsh6', 'msl', 'sp', 'apcp', 'refc', 'tcc', 't', 'gh', 'u', 'v', 'r'],
+      overrides: {
+        msl: { v: 'MSLET' },
+        mucape: { l: '180-0 mb above ground' },
+        mucin: { l: '180-0 mb above ground' },
+      },
+      gridRelativeWinds: true,
+      regrid: { res: 0.1 },
+    }),
+    derived: {
+      vo: vortFromWinds,
+      // APCP restarts every 12 h (0-1 … 0-12, 12-13 … 12-24, …), as in NOAA's NAM.
+      tp: tpFromBuckets(12),
+      tprate: tprateFromBuckets(12),
+      ptype: ptypeProfile,
+      dcape: dcapeFrom(DCAPE_FINE),
+    },
+    notes: { ptype: 'type from temperature profile', tprate: '1 h mean' },
     profile: PROFILE_HIRES,
   },
 };
