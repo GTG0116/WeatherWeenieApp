@@ -101,6 +101,20 @@ export class MapTools {
     this.#draw();
   }
 
+  /** Redraw a panel's shape (its ends were swapped, say). */
+  setShape(panel, shape) {
+    this.shapes[panel] = shape;
+    this.#draw();
+  }
+
+  /** Start a cross section at a point: the next click ends it. */
+  startLine(ll) {
+    this.setMode('line');
+    this.anchor = ll;
+    this.lastPick = performance.now();
+    this.#draw();
+  }
+
   #click(ll) {
     this.lastPick = performance.now();
     if (this.mode === 'point') {

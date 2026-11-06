@@ -233,7 +233,20 @@ export function liftParcel(prof, start, ptop = 100) {
   // Buoyant right from the LCL: the LFC is the LCL itself.
   const lfcP = lfc >= 0 ? (lfc > 0 && buoy[lfc - 1] > 0 ? lclP : ps[lfc]) : null;
   const elP = el >= 0 ? ps[el] : null;
-  return { cape, cin: cape > 0 ? cin : 0, lclP, lclH: h(lclP), lfcP, lfcH: h(lfcP), elP, elH: h(elP), trace };
+  return { cape, cin: cape > 0 ? cin : 0, lclP, lclH: h(lclP), lfcP, lfcH: h(lfcP), elP, elH: h(elP), trace, buoy, lfcIndex: lfc, elIndex: el };
+}
+
+/** CAPE (J/kg) of a lifted parcel below a height above ground (3CAPE, 6CAPE). */
+export function capeBelow(prof, parcel, hTop) {
+  if (parcel.lfcIndex < 0) return 0;
+  const pTop = pressureAt(prof, hTop);
+  const { p } = parcel.trace;
+  const b = parcel.buoy;
+  let total = 0;
+  for (let i = parcel.lfcIndex + 1; i <= parcel.elIndex && p[i] >= pTop; i++) {
+    total += Math.max(0, RD * 0.5 * (b[i] + b[i - 1]) * Math.log(p[i - 1] / p[i]));
+  }
+  return total;
 }
 
 /**
@@ -281,7 +294,7 @@ export function bulkShear(prof, h0, h1) {
   return Math.hypot(u1 - u0, v1 - v0);
 }
 
-function meanWind(prof, h0, h1) {
+export function meanWind(prof, h0, h1) {
   let su = 0;
   let sv = 0;
   let n = 0;
@@ -308,10 +321,13 @@ export function bunkers(prof) {
 }
 
 /** Storm-relative helicity (m²/s²) from the surface to h1 for storm motion (cu, cv). */
-export function srh(prof, h1, [cu, cv]) {
+export const srh = (prof, h1, storm) => srhLayer(prof, 0, h1, storm);
+
+/** Storm-relative helicity (m²/s²) of the layer h0–h1 (m AGL). */
+export function srhLayer(prof, h0, h1, [cu, cv]) {
   let total = 0;
-  let [u0, v0] = windAt(prof, 0);
-  for (let h = 100; h <= h1 + 1e-6; h += 100) {
+  let [u0, v0] = windAt(prof, h0);
+  for (let h = h0 + 100; h <= h1 + 1e-6; h += 100) {
     const [u1, v1] = windAt(prof, h);
     total += (u1 - cu) * (v0 - cv) - (u0 - cu) * (v1 - cv);
     u0 = u1;
@@ -399,4 +415,112 @@ export function soundingIndices(prof) {
     scp: scp(parcels.mu.cape, s3, sh6),
     pressureAt: (h) => pressureAt(prof, h),
   };
+}
+
+// ---------------------------------------------------------------- effective layer & composites
+/** Mean relative humidity (%) between two pressures (sampled every 10 hPa). */
+export function meanRh(prof, p0, p1) {
+  let sum = 0;
+  let n = 0;
+  for (let p = Math.min(p0, prof.p[0]); p >= p1; p -= 10) {
+    sum += rhFromDewpoint(interpLog(p, prof.p, prof.t), interpLog(p, prof.p, prof.td));
+    n++;
+  }
+  return n ? sum / n : NaN;
+}
+
+/**
+ * Effective inflow layer (Thompson et al. 2007): the lowest contiguous layer of
+ * parcels, from the ground up, with CAPE ≥ 100 J/kg and CIN ≥ −250 J/kg.
+ * @returns {{pBot: number, pTop: number, hBot: number, hTop: number}|null}
+ */
+export function effectiveLayer(prof) {
+  const ps = prof.p[0];
+  let bot = null;
+  let top = null;
+  for (let p = ps; p >= ps - 300; p -= 10) {
+    const r = liftParcel(prof, { p, t: interpLog(p, prof.p, prof.t), td: interpLog(p, prof.p, prof.td) });
+    const ok = r.cape >= 100 && r.cin >= -250;
+    if (ok && bot == null) bot = p;
+    if (ok) top = p;
+    else if (bot != null) break;
+  }
+  if (bot == null) return null;
+  return { pBot: bot, pTop: top, hBot: heightAt(prof, bot), hTop: heightAt(prof, top) };
+}
+
+/**
+ * Everything the sounding's lower tables list beyond soundingIndices: layer
+ * CAPE, the effective inflow layer with its helicity and shear, layer
+ * kinematics and the composite parameters SPC uses.
+ */
+export function extendedIndices(prof, ix) {
+  const { sb, ml, mu } = ix.parcels;
+  const rm = ix.storm.rm;
+  const eil = effectiveLayer(prof);
+  const esrh = eil ? srhLayer(prof, eil.hBot, eil.hTop, rm) : 0;
+  // Effective bulk shear: from the inflow base to half the MU equilibrium level.
+  const ebwd = eil && mu.elH ? bulkShear(prof, eil.hBot, eil.hBot + 0.5 * (mu.elH - eil.hBot)) : 0;
+  const layer = (h0, h1) => {
+    const [mu0, mv0] = meanWind(prof, h0, h1);
+    return { shear: bulkShear(prof, h0, h1), srh: srhLayer(prof, h0, h1, rm), srw: Math.hypot(mu0 - rm[0], mv0 - rm[1]) };
+  };
+  const layers = [
+    ['0–0.5 km', 0, 500],
+    ['0–1 km', 0, 1000],
+    ['0–3 km', 0, 3000],
+    ['0–6 km', 0, 6000],
+    ['1–3 km', 1000, 3000],
+    ['3–6 km', 3000, 6000],
+  ].map(([name, h0, h1]) => ({ name, ...layer(h0, h1) }));
+  if (eil) layers.push({ name: 'Effective', shear: ebwd, srh: esrh, srw: layer(eil.hBot, Math.max(eil.hTop, eil.hBot + 250)).srw });
+  // Effective-layer STP with CIN (Thompson et al. 2012), from the mixed-layer parcel.
+  const lclT = ml.lclH < 1000 ? 1 : ml.lclH > 2000 ? 0 : (2000 - ml.lclH) / 1000;
+  const shrT = ebwd < 12.5 ? 0 : Math.min(ebwd, 30) / 20;
+  const cinT = ml.cin > -50 ? 1 : ml.cin < -200 ? 0 : (200 + ml.cin) / 150;
+  const stpCin = eil ? Math.max(0, (ml.cape / 1500) * lclT * (esrh / 150) * shrT * cinT) : 0;
+  // Bulk Richardson number shear: 0–6 km density-weighted mean wind minus the 0–500 m mean.
+  const [a0, b0] = meanWind(prof, 0, 6000);
+  const [a1, b1] = meanWind(prof, 0, 500);
+  const brnShear = 0.5 * ((a0 - a1) ** 2 + (b0 - b1) ** 2);
+  const mlStart = ml.start;
+  return {
+    eil,
+    esrh,
+    ebwd,
+    layers,
+    cape3: { sb: capeBelow(prof, sb, 3000), ml: capeBelow(prof, ml, 3000), mu: capeBelow(prof, mu, 3000) },
+    cape6: { sb: capeBelow(prof, sb, 6000), ml: capeBelow(prof, ml, 6000), mu: capeBelow(prof, mu, 6000) },
+    stpCin,
+    ehi1: (ml.cape * ix.srh1) / 160000,
+    ehi3: (ml.cape * ix.srh3) / 160000,
+    brn: brnShear > 0.5 ? ml.cape / brnShear : 0,
+    sigSvr: ml.cape * ix.shear6,
+    meanW: satMix(mlStart.td, mlStart.p) * 1000, // g/kg, lowest 100 hPa
+    lowRh: meanRh(prof, prof.p[0], prof.p[0] - 150),
+    midRh: meanRh(prof, 700, 500),
+    lr26: lapseRate(prof, 2000, 6000),
+  };
+}
+
+/**
+ * A rough guide to the kind of weather a sounding favours, loosely after
+ * SHARPpy's "possible hazard" box (its thresholds simplified).
+ */
+export function hazardType(prof, ix, ex) {
+  const { ml, mu } = ix.parcels;
+  const kt = 1.943844;
+  const t2 = prof.t[0] - 273.15;
+  const sfcWind = Math.hypot(prof.u[0], prof.v[0]) * kt;
+  const [mwu, mwv] = ix.storm.mean;
+  const meanKt = Math.hypot(mwu, mwv) * kt;
+  if (ex.stpCin >= 3 && ex.esrh >= 200 && ml.lclH < 1200) return 'PDS Tornado';
+  if (ex.stpCin >= 1 || (ix.stp >= 1 && ml.cin > -125)) return 'Tornado';
+  if (ex.stpCin >= 0.5 && ex.esrh >= 100) return 'Marginal Tornado';
+  if (ix.scp >= 1 || (mu.cape >= 1500 && ex.ebwd * kt >= 35)) return 'Severe';
+  if ((mu.cape >= 500 && ix.shear6 * kt >= 25) || (mu.cape >= 1000 && ix.dcape >= 1000)) return 'Marginal Severe';
+  if (ix.pwat >= 38 && meanKt < 15 && mu.cape > 0) return 'Flash Flood';
+  if (t2 <= 0 && sfcWind >= 30) return 'Blizzard';
+  if (t2 >= 37 || (t2 >= 32 && prof.td[0] - 273.15 >= 24)) return 'Excessive Heat';
+  return 'None';
 }

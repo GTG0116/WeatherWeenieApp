@@ -1,6 +1,6 @@
 // Minimal GRIB2 decoder for ECMWF and NCEP open data.
 // Supports: grid templates 3.0 (regular lat/lon), 3.30 (Lambert conformal) and
-// 3.32769 (NCEP rotated lat/lon), product templates 4.0/4.1/4.8/4.11, data
+// 3.32769 (NCEP rotated lat/lon), product templates 4.0/4.1/4.2/4.8/4.11/4.12, data
 // representation 5.0 (simple), 5.2/5.3 (complex packing, spatial differencing),
 // 5.40 (JPEG 2000) and 5.42 (CCSDS/AEC), bitmaps. Projected grids are regridded
 // in regrid.js.
@@ -161,7 +161,8 @@ function parseProduct(s, st) {
   st.number = s[10];
   // Ensemble templates carry the perturbation number (0 = control).
   st.member = tpl === 1 || tpl === 11 ? s[35] : null;
-  if (tpl === 0 || tpl === 8 || tpl === 1 || tpl === 11) {
+  // 4.2/4.12: derived from all members (ECMWF's ensemble mean); same layout up to the level.
+  if (tpl === 0 || tpl === 8 || tpl === 1 || tpl === 11 || tpl === 2 || tpl === 12) {
     const unit = s[17];
     const ft = s32(s, 18);
     st.forecastHours = unit === 1 ? ft : unit === 0 ? ft / 60 : unit === 2 ? ft * 24 : ft;

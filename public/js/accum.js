@@ -106,6 +106,11 @@ export class Accumulator {
     this.cache = new Map(); // "kind/model/run" -> Map(step -> {acc, meta})
   }
 
+  /** Keep only the totals of the view on screen ("kind/model/run"), or none. */
+  retain(key) {
+    for (const k of this.cache.keys()) if (k !== key) this.cache.delete(k);
+  }
+
   /** Whether a step is ready without fetching anything. */
   has(kind, model, run, step) {
     return !!this.cache.get(`${kind}/${model}/${run.id}`)?.has(step);
