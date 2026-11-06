@@ -341,7 +341,13 @@ The gear button (map buttons, or **Settings** in the sidebar) opens a drawer bes
   hillshade; rotate and tilt. The map's own place labels stay hidden: town names and city values
   are the app's on both engines. Model fields and radar are drawn by the same shader in Web Mercator
   for the area in view (`Globe.renderFlat`) and handed to MapLibre as a canvas source. Wind
-  particles and the 3D radar view need the WebGL globe.
+  particles and the 3D radar view need the WebGL globe. Bold, haloed coastlines are drawn over
+  the data on every style. On low-end devices (little memory, few cores, or a phone; `?lowend=1`
+  simulates one) MapLibre runs lighter: a smaller data canvas, no multisampling, 50m lines.
+  If the page dies with MapLibre on, or the GPU drops its context, the next load (or the
+  current page) falls back to the WebGL globe and says so, rather than crashing in a loop.
+  Memory budgets for decoded fields and running totals follow the device (`public/js/device.js`),
+  so a long run like GFS (209 hours) preloads only as many hours as fit.
 - **Size**: frame the map at a social media size (X, Instagram square/portrait, stories, Facebook,
   YouTube, 4:3 or custom). Only the map and what's drawn on it change: the sidebar, timeline and
   buttons stay put.

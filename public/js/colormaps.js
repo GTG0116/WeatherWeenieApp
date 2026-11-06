@@ -17,13 +17,16 @@ export class Colormap {
   /**
    * @param {Array<Array<[number,string,number?]>>|Array<[number,string,number?]>} stops
    *   one stop list, or several rows (used for precip type)
-   * @param {{scale?: 'linear'|'log', domain?: [number, number]}} opts
+   * @param {{scale?: 'linear'|'log', domain?: [number, number], knots?: number[]}} opts
+   *   knots: values placed evenly along the scale (up to 16), linear in between,
+   *   like a legend labelled 1, 2, 4, 6, 12, 18... at equal spacing
    */
-  constructor(stops, { scale = 'linear', domain } = {}) {
+  constructor(stops, { scale = 'linear', domain, knots } = {}) {
     this.rows = Array.isArray(stops[0][0]) ? stops : [stops];
-    this.scale = scale;
+    this.scale = knots ? 'knots' : scale;
+    this.knots = knots ?? null;
     const first = this.rows[0];
-    this.domain = domain ?? [first[0][0], first[first.length - 1][0]];
+    this.domain = knots ? [knots[0], knots[knots.length - 1]] : domain ?? [first[0][0], first[first.length - 1][0]];
     this.rgba = new Uint8Array(LUT_SIZE * this.rows.length * 4);
     this.rows.forEach((row, r) => {
       for (let i = 0; i < LUT_SIZE; i++) {
@@ -36,6 +39,13 @@ export class Colormap {
   /** Normalized position in the LUT [0,1] for a value. */
   position(v) {
     const [a, b] = this.domain;
+    if (this.knots) {
+      const k = this.knots;
+      const n = k.length - 1;
+      let i = 0;
+      while (i < n - 1 && v > k[i + 1]) i++;
+      return (i + (v - k[i]) / (k[i + 1] - k[i] || 1)) / n;
+    }
     if (this.scale === 'log') {
       const lv = Math.log(Math.max(v, 1e-9));
       return (lv - Math.log(a)) / (Math.log(b) - Math.log(a));
@@ -45,6 +55,12 @@ export class Colormap {
 
   valueAt(t) {
     const [a, b] = this.domain;
+    if (this.knots) {
+      const k = this.knots;
+      const n = k.length - 1;
+      const i = Math.max(0, Math.min(n - 1, Math.floor(t * n)));
+      return k[i] + (t * n - i) * (k[i + 1] - k[i]);
+    }
     if (this.scale === 'log') return Math.exp(Math.log(a) + t * (Math.log(b) - Math.log(a)));
     return a + t * (b - a);
   }
@@ -100,10 +116,15 @@ export const HEIGHT_GRADIENT = [
   '#f5d64a', '#f7a53a', '#ec6a32', '#d23b2f', '#a51d3c',
 ];
 
+// Dew point, stops in °F (stored in °C): brown when dry, a cream break at 40,
+// greens to 60, then blues, indigo and mauve for very humid air.
+const F = (f) => ((f - 32) * 5) / 9;
 export const DEWPOINT_C = [
-  [-40, '#2e2219'], [-25, '#5a3f2a'], [-15, '#7d5b3a'], [-8, '#9d7a50'], [-2, '#bea374'],
-  [3, '#c9c48a'], [7, '#9cc874'], [10, '#5fb35a'], [13, '#2f9e4b'], [16, '#1d8c6e'],
-  [18, '#1c7fa3'], [20, '#2a5fc0'], [22, '#4b3fc6'], [24, '#7b33c2'], [26, '#b02fa8'], [28, '#e04f8a'],
+  [F(-40), '#c39073'], [F(0), '#514733'], [F(40), '#f8eadf'],
+  [F(40), '#d2f4d2'], [F(60), '#0a780a'],
+  [F(60), '#63a5bf'], [F(70), '#132a5b'],
+  [F(70), '#68689a'], [F(80), '#2c2864'],
+  [F(80), '#a57282'], [F(90), '#7b5266'],
 ];
 
 export const ANOMALY_C = [
@@ -118,11 +139,13 @@ export const WIND_SFC_MS = [
   [26, '#b21f5a'], [30, '#8d1c8f'], [35, '#6a2bc4'], [40, '#a77ae8'], [50, '#f2e2ff'],
 ];
 
+// Upper-air wind, stops in knots (stored in m/s), 0-150 kt: light blue at the
+// edge of a jet, then indigo, orchid, plum, crimson, gold and tan.
+const KT = 0.514444;
 export const WIND_UPPER_MS = [
-  [0, '#0d1b2a', 0], [8, '#1b3a5c', 0.2], [13, '#24548a', 0.55], [18, '#2f73b8', 0.85],
-  [23, '#3b98d4', 1], [28, '#42c0c4'], [33, '#56d38a'], [38, '#a3dd52'], [43, '#ecd93f'],
-  [49, '#f6ab33'], [56, '#ef712d'], [64, '#da3d32'], [72, '#b51f58'], [80, '#8a238f'],
-  [90, '#b46ee0'], [100, '#f2d9ff'],
+  [0, '#1a212a', 0], [16.5 * KT, '#26303b', 0.5], [20 * KT, '#4a6680', 0.9], [25.5 * KT, '#80c6f8', 1],
+  [40 * KT, '#6478d2'], [60 * KT, '#d982d0'], [82.5 * KT, '#7a066d'], [105 * KT, '#d73447'],
+  [127.5 * KT, '#e8d579'], [150 * KT, '#bb8b5b'],
 ];
 
 export const VORT_E5 = [
@@ -185,11 +208,20 @@ export const WIND_SHEAR_MS = [
   [28.3, '#f6ab33'], [31, '#ef712d'], [36, '#da3d32'], [41, '#b51f58'], [51, '#8a238f'], [62, '#e0b0f7'],
 ];
 
+// Snowfall, stops in inches (stored in cm), on evenly spaced knots
+// (SNOW_KNOTS_CM): grey under 1", blues to 6", yellow-orange-red to 24",
+// maroon to 36", then purple to lavender.
 const IN = 2.54; // cm per inch
+export const SNOW_KNOTS_CM = [0, 1, 2, 4, 6, 12, 18, 24, 36, 48, 60].map((x) => x * IN);
 export const SNOW_CM = [
-  [0.1 * IN, '#cfe3fa', 0], [0.4 * IN, '#cfe3fa', 0.55], [1 * IN, '#9cc3f0', 0.9], [2 * IN, '#6b9fe4', 1],
-  [3 * IN, '#4277d6'], [4 * IN, '#2c52bd'], [6 * IN, '#5b3fc2'], [8 * IN, '#8b3fc6'], [12 * IN, '#c04ab9'],
-  [18 * IN, '#e2709e'], [24 * IN, '#f19a7d'], [36 * IN, '#f6ca86'], [48 * IN, '#ffffff'],
+  [0.05 * IN, '#cfcfcf', 0], [0.3 * IN, '#b5b5b5', 0.85], [0.6 * IN, '#9a9a9a', 1], [1 * IN, '#6a6a6a'],
+  [1 * IN, '#bfd0e1'], [2 * IN, '#9db0d2'], [4 * IN, '#4f68b2'], [6 * IN, '#0b2795'],
+  [6 * IN, '#ffff96'], [12 * IN, '#ff9605'],
+  [12 * IN, '#fd8200'], [18 * IN, '#e02a03'],
+  [18 * IN, '#d81202'], [24 * IN, '#9a0000'],
+  [24 * IN, '#980000'], [27 * IN, '#8a0000'], [30 * IN, '#690201'], [36 * IN, '#2b002f'],
+  [38 * IN, '#360b3e'], [44.4 * IN, '#592f71'], [48 * IN, '#663c85'],
+  [48 * IN, '#7d55a6'], [50.9 * IN, '#9278c5'], [55.2 * IN, '#ccc3fa'], [60 * IN, '#d2cafb'],
 ];
 
 // Freezing rain, liquid equivalent in mm
@@ -234,13 +266,20 @@ export const PRECIP_TYPES = [
   { row: 4, name: 'Freezing' },
 ];
 
-// Precipitation totals (QPF), liquid equivalent in mm, stops at the usual inch thresholds
+// Precipitation totals (QPF), stops in inches (stored in mm), on evenly spaced
+// knots (QPF_KNOTS_MM): grey under 0.1", greens, blues to 1", yellow-orange to 2",
+// reds to 4", magenta-lilac-periwinkle to 10", cyan to teal and brown at 20".
 const INCH = 25.4;
+export const QPF_KNOTS_MM = [0, 0.1, 0.5, 1, 2, 4, 6, 8, 10, 15, 20].map((x) => x * INCH);
 export const QPF_MM = [
-  [0.01 * INCH, '#b9e3b0', 0], [0.03 * INCH, '#9ed69a', 0.7], [0.1 * INCH, '#5cb85c', 0.9],
-  [0.25 * INCH, '#2e8b3e', 1], [0.5 * INCH, '#1f5fae'], [0.75 * INCH, '#3f8fd8'], [1 * INCH, '#f2e14c'],
-  [1.5 * INCH, '#f5a630'], [2 * INCH, '#e8572b'], [3 * INCH, '#c21f3d'], [4 * INCH, '#9c1a8c'],
-  [6 * INCH, '#d38be8'], [10 * INCH, '#f5ddff'],
+  [0.01 * INCH, '#c6c6c6', 0], [0.03 * INCH, '#b1b1b1', 0.75], [0.1 * INCH, '#6a6a6a', 1],
+  [0.1 * INCH, '#9dc09d'], [0.5 * INCH, '#4b7d47'],
+  [0.5 * INCH, '#0b4caa'], [1 * INCH, '#8ab2d4'],
+  [1 * INCH, '#f8e62c'], [2 * INCH, '#ff861e'],
+  [2 * INCH, '#ff5019'], [4 * INCH, '#8e0527'],
+  [4 * INCH, '#ae0767'], [6 * INCH, '#c6b4da'], [8 * INCH, '#aac8e6'], [10 * INCH, '#91a7e5'],
+  [10 * INCH, '#4fa0ff'], [12.5 * INCH, '#09ddea'], [15 * INCH, '#2ccccf'],
+  [15 * INCH, '#3db9ba'], [17.5 * INCH, '#608c8c'], [20 * INCH, '#3e2e1b'],
 ];
 
 // Surface visibility, m: the lower, the stronger (1/4, 1, 2, 3, 5 and 7 mi stops)

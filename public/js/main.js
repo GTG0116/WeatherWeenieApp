@@ -20,6 +20,7 @@ import { AlertLayer, alertSettings } from './alerts.js';
 import { Broadcast, broadcastSettings } from './broadcast.js';
 import { exportDetail, frameSettings, frameSize, layoutFrame, renderFramePanel } from './frame.js';
 import { Exporter } from './export.js';
+import { DEVICE } from './device.js';
 
 const $ = (sel) => document.querySelector(sel);
 const STORE_KEY = 'model-globe-state-v1';
@@ -282,6 +283,52 @@ let maplibre = null;
 let engineBusy = null;
 const mapLibreOn = () => !!maplibre?.ready;
 
+// Crash-loop guard. A device that runs out of memory with MapLibre on crashes the
+// tab, and a reload would bring MapLibre (the saved engine) straight back, crash
+// again, and so on. So a marker is kept in storage while MapLibre is starting or
+// on screen, and removed whenever the page is left or hidden normally (a crash
+// does neither). Finding it at boot means the last session died with MapLibre
+// on: start on the built-in globe instead, and say so.
+const ENGINE_GUARD_KEY = 'model-globe-maplibre-running';
+let engineStarting = false;
+let engineNotice = ''; // why MapLibre is off, shown in the Map settings
+const guard = {
+  get() {
+    try {
+      return localStorage.getItem(ENGINE_GUARD_KEY) != null;
+    } catch {
+      return false;
+    }
+  },
+  set() {
+    try {
+      localStorage.setItem(ENGINE_GUARD_KEY, String(Date.now()));
+    } catch {
+      // storage unavailable: no guard, but nothing to loop on either
+    }
+  },
+  clear() {
+    try {
+      localStorage.removeItem(ENGINE_GUARD_KEY);
+    } catch {
+      // nothing to clear
+    }
+  },
+};
+addEventListener('pagehide', () => guard.clear());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) guard.clear();
+  else if (mapLibreOn() || engineStarting) guard.set();
+});
+
+/** MapLibre failed or lost its GPU context: back to the built-in globe, and remember that. */
+function engineFailed(message) {
+  guard.clear();
+  engineNotice = message;
+  setStatus(message, 'error');
+  if (state.map.engine === 'maplibre' || mapLibreOn()) setEngine('globe');
+}
+
 async function setEngine(kind, { save = true } = {}) {
   if (save) {
     state.map.engine = kind;
@@ -296,18 +343,32 @@ async function setEngine(kind, { save = true } = {}) {
       el.id = 'maplibre';
       globe.container.appendChild(el);
       setStatus('Loading MapLibre GL…');
-      const eng = new MapLibreEngine(globe, el, state.map, { onError: (msg) => setStatus(`Map style: ${msg}`, 'error') });
+      guard.set();
+      engineStarting = true;
+      const eng = new MapLibreEngine(globe, el, state.map, {
+        onError: (msg) => setStatus(`Map style: ${msg}`, 'error'),
+        onContextLost: () => engineFailed('The MapLibre map ran out of graphics memory, so the built-in globe is back on'),
+      });
       try {
         await eng.init();
         maplibre = eng;
         setStatus('MapLibre map ready', 'done');
       } catch (err) {
+        guard.clear();
+        try {
+          eng.destroy();
+        } catch {
+          // never got far enough to need tearing down
+        }
         el.remove();
         state.map.engine = 'globe';
         persist();
         setStatus(`Couldn't start MapLibre: ${err.message}`, 'error');
+      } finally {
+        engineStarting = false;
       }
     } else if (maplibre) {
+      guard.clear();
       const el = maplibre.container;
       maplibre.destroy();
       el.remove();
@@ -355,7 +416,7 @@ function buildMapPanel() {
       <div class="toggle${m.hillshade ? ' on' : ''}" data-act="hillshade"><span>Hillshade<span class="sub">Terrain shading under the data</span></span><span class="switch"></span></div>
       ${m.hillshade ? `<label class="slider-row"><span>Shading</span><output>${pct(m.hillshadeStrength)}</output><input type="range" min="0.05" max="1" step="0.05" value="${m.hillshadeStrength}" data-act="hillshadeStrength" /></label>` : ''}
       <div class="toggle${m.rotate ? ' on' : ''}" data-act="rotate"><span>Rotate &amp; tilt<span class="sub">Right-drag turns the map (box soundings: use the B tool)</span></span><span class="switch"></span></div>`
-        : '<div class="hint-row">Switch to MapLibre for street, satellite and custom base maps.</div>'
+        : `${engineNotice ? `<div class="hint-row engine-notice">${engineNotice}</div>` : ''}<div class="hint-row">Switch to MapLibre for street, satellite and custom base maps.${DEVICE.lowEnd ? ' On this device it runs lighter (smaller data canvas, simpler lines).' : ''}</div>`
     }`;
   const eng = () => (mapLibreOn() ? maplibre : null);
   el.querySelectorAll('[data-act="engine"] button').forEach((b) => b.addEventListener('click', () => setEngine(b.dataset.v)));
@@ -608,7 +669,15 @@ function applyLineTheme() {
 
 // ------------------------------------------------------------------ status
 let statusTimer = null;
+let statusHeld = 0; // a message that routine progress mustn't replace until then
+let bootNotice = '';
+function holdStatus(text, ms) {
+  setStatus(text, 'error');
+  statusHeld = performance.now() + ms;
+}
 function setStatus(text, kind = 'busy') {
+  if (performance.now() < statusHeld && kind !== 'error') return;
+  statusHeld = 0;
   const el = $('#status');
   clearTimeout(statusTimer);
   el.className = kind;
@@ -1508,7 +1577,7 @@ function updateBroadcast() {
       for (const t of all) {
         const pos = (cm.position(u.inv(t)) - g.t0) / (1 - g.t0);
         if (pos < 0.03 || pos > 0.97) continue;
-        if (ticks.length && pos - ticks[ticks.length - 1].pos < 0.11) continue;
+        if (ticks.length && pos - ticks[ticks.length - 1].pos < 0.095) continue; // evenly spaced knots sit 0.1 apart
         ticks.push({ pos, label: p.legendLabel ? p.legendLabel(t) : String(t) });
       }
       legend = { segments: [{ gradient: g.css, ticks }], unit: p.classes ? '' : u.label };
@@ -2055,7 +2124,17 @@ async function boot() {
   alerts.bindPanel($('#alerts-panel'));
   broadcast.bindPanel($('#broadcast-panel'));
   bindEvents();
-  if (state.map.engine === 'maplibre') setEngine('maplibre', { save: false });
+  if (state.map.engine === 'maplibre') {
+    if (guard.get()) {
+      // The last MapLibre session didn't survive (see guard): don't loop on it.
+      guard.clear();
+      state.map.engine = 'globe';
+      persist();
+      engineNotice = "The MapLibre map crashed the page last time, so the built-in globe is on. You can switch back here.";
+      buildMapPanel();
+      bootNotice = "The MapLibre map crashed the page last time, so the built-in globe is on (Settings › Map to switch back)";
+    } else setEngine('maplibre', { save: false });
+  }
   syncAlerts();
   loadGeo().catch((err) => console.error('geo', err));
   globe.loadBase().catch((err) => console.error('base map', err));
@@ -2071,6 +2150,7 @@ async function boot() {
   } catch (err) {
     setStatus(err.message, 'error');
   }
+  if (bootNotice) holdStatus(bootNotice, 8000);
 }
 
 boot();

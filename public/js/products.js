@@ -2,7 +2,7 @@
 // into a displayable field (canonical units), plus styling.
 import {
   ANOMALY_C, CAPE, CIN, CLOUD, Colormap, DCAPE, DEWPOINT_C, FZRA_MM, HEIGHT_GRADIENT, LAPSE, LCL_M, LIGHTNING, PRECIP_ROWS,
-  PROB_PCT, QPF_MM, REFLECTIVITY_DBZ, SLEET_CM, SNOW_CM, SRH, STP, TEMP_C, TEMP_GRADIENT, VIS_M, VORT_E5, WIND_SFC_MS,
+  PROB_PCT, QPF_KNOTS_MM, QPF_MM, REFLECTIVITY_DBZ, SLEET_CM, SNOW_CM, SNOW_KNOTS_CM, SRH, STP, TEMP_C, TEMP_GRADIENT, VIS_M, VORT_E5, WIND_SFC_MS,
   WIND_SHEAR_MS, WIND_UPPER_MS, spread,
 } from './colormaps.js';
 import { climatologyField } from './climatology.js';
@@ -584,14 +584,14 @@ export const PRODUCTS = [
       const prev = inp.prev?.values;
       return { field: map(inp.tp.values, (x, i) => Math.max(0, x - (prev ? prev[i] : 0)) * 1000) }; // m -> mm
     },
-    colormap: () => cm('qpf', () => new Colormap(QPF_MM, { scale: 'log', domain: [0.25, 254] })),
+    colormap: () => cm('qpf', () => new Colormap(QPF_MM, { knots: QPF_KNOTS_MM })),
     contourTheme: 'light',
     lineTheme: 'light',
     cityValues: true,
     cityMin: 0.25, // mm; hide trace amounts
     isobars: true,
     format: fmtPrecip,
-    legendTicks: (units) => (units === 'imperial' ? [0.1, 0.25, 0.5, 1, 2, 3, 5] : [1, 2.5, 5, 10, 25, 50, 100]),
+    legendTicks: (units) => (units === 'imperial' ? [0.1, 0.5, 1, 2, 4, 6, 8, 10, 15] : [2.5, 10, 25, 50, 100, 150, 200, 250, 380]),
   },
 
   // ---------------------------------------------------------------- winter (accumulated since F000)
@@ -770,13 +770,13 @@ PRODUCTS.push(
 
 function snowStyle() {
   return {
-    colormap: () => cm('snow', () => new Colormap(SNOW_CM, { scale: 'log', domain: [0.25, 122] })),
+    colormap: () => cm('snow', () => new Colormap(SNOW_CM, { knots: SNOW_KNOTS_CM })),
     contourTheme: 'light',
     lineTheme: 'light',
     cityValues: true,
     cityMin: 0.25, // cm; hide trace amounts
     format: (v) => (v < 10 ? v.toFixed(1) : String(Math.round(v))),
-    legendTicks: (units) => (units === 'imperial' ? [0.5, 1, 2, 4, 6, 8, 12, 18, 24, 36] : [1, 2.5, 5, 10, 15, 20, 30, 45, 60, 90]),
+    legendTicks: (units) => (units === 'imperial' ? [1, 2, 4, 6, 12, 18, 24, 36, 48] : [2.5, 5, 10, 15, 30, 45, 60, 90, 120]),
   };
 }
 
