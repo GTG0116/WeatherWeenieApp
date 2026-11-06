@@ -8,8 +8,8 @@ import { fetchRetry } from '../sources.js';
 import { dcape, dewpointFromRh } from '../thermo.js';
 
 /** Bytes [from, to] of a file (or all of it without a range), trying mirrors in order. */
-async function fetchBytes(urls, range) {
-  const init = range ? { headers: { Range: `bytes=${range[0]}-${range[1] ?? ''}` } } : undefined;
+async function fetchBytes(urls, range, signal) {
+  const init = range ? { headers: { Range: `bytes=${range[0]}-${range[1] ?? ''}` }, signal } : { signal };
   const res = await fetchRetry(urls, init);
   const name = urls[0].split('/').pop();
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${name}`);
@@ -51,8 +51,8 @@ function pickMember(buf, member, need = null) {
  */
 async function gribJob(job) {
   const raw = await Promise.all([
-    job.bytes ?? fetchBytes([job.url, ...(job.alt ?? [])], job.range),
-    job.pair && (job.pair.bytes ?? fetchBytes([job.pair.url], job.pair.range)),
+    job.bytes ?? fetchBytes([job.url, ...(job.alt ?? [])], job.range, job.signal),
+    job.pair && (job.pair.bytes ?? fetchBytes([job.pair.url], job.pair.range, job.signal)),
   ]);
   const t0 = performance.now();
   const need = pointsFor(job.extract, job.regrid);
@@ -80,7 +80,7 @@ async function gribJob(job) {
 
 /** The messages of a file of all ensemble members, as separate buffers to decode in parallel. */
 async function splitJob(job) {
-  const buf = await fetchBytes([job.url], job.range);
+  const buf = await fetchBytes([job.url], job.range, job.signal);
   const parts = splitGrib2(buf).map((m) => m.slice());
   return { fields: [], parts, bytes: buf.byteLength, decodeMs: 0 };
 }
@@ -100,7 +100,7 @@ async function sumJob(job) {
   let ms = 0;
   await Promise.all(
     job.parts.map(async (part) => {
-      const buf = part.bytes ?? (await fetchBytes([part.url, ...(part.alt ?? [])], part.range));
+      const buf = part.bytes ?? (await fetchBytes([part.url, ...(part.alt ?? [])], part.range, job.signal));
       if (!part.bytes) bytes += buf.byteLength;
       const t0 = performance.now();
       let f = decodeOne(buf, pointsFor(part.extract));
@@ -169,16 +169,47 @@ function computeJob(job) {
 // Open-Meteo's reader (WebAssembly) is loaded only when an ICON field is needed.
 let om = null;
 const MAX_READERS = 12;
+// Reads at least this big skip the 64 KB block cache and go out as one range request.
+const DIRECT_BYTES = 128 * 1024;
 
-async function omJob({ url, variable }) {
+/**
+ * The file's small reads (header, variable list, chunk indexes) go through
+ * 64 KB cached blocks, shared by every variable read from it; a variable's data
+ * is fetched in one or two big range requests instead of dozens of blocks.
+ * (A whole ICON field took ~35 block requests; this takes 1–2, about twice as fast.)
+ */
+class HybridBackend {
+  constructor(http, cached) {
+    this.http = http;
+    this.cached = cached;
+  }
+
+  count(signal) {
+    return this.cached.count(signal);
+  }
+
+  getBytes(offset, size, signal) {
+    return size >= DIRECT_BYTES ? this.http.getBytes(offset, size, signal) : this.cached.getBytes(offset, size, signal);
+  }
+
+  close() {}
+}
+
+async function omJob({ url, variable, signal }) {
   om ??= import('../../vendor/openmeteo/file-reader.js').then((mod) => ({
     mod,
-    cache: new mod.LruBlockCache(64 * 1024, 1024),
+    // Index and metadata blocks only (data skips it): 16 MB per worker.
+    cache: new mod.LruBlockCache(64 * 1024, 256),
     readers: new Map(),
   }));
   const { mod, cache, readers } = await om;
   if (!readers.has(url)) {
-    const p = new mod.OmHttpBackend({ url }).asCachedReader(cache);
+    const p = (async () => {
+      const http = new mod.OmHttpBackend({ url, retries: 3 });
+      await http.fetchMetadata();
+      const cached = mod.BlockCacheBackend.withBigIntKeys(http, cache, http.cacheKeyBigInt);
+      return mod.OmFileReader.create(new HybridBackend(http, cached));
+    })();
     p.catch(() => readers.delete(url));
     readers.set(url, p);
     while (readers.size > MAX_READERS) {
@@ -192,7 +223,15 @@ async function omJob({ url, variable }) {
   if (!child) throw new Error(`${variable} isn't in ${url.split('/').pop()}`);
   const dims = child.getDimensions();
   const t0 = performance.now();
-  const data = await child.read({ type: mod.OmDataType.FloatArray, ranges: dims.map((d) => ({ start: 0, end: d })) });
+  // Big merged reads (see HybridBackend), decoded as each arrives.
+  const data = await child.read({
+    type: mod.OmDataType.FloatArray,
+    ranges: dims.map((d) => ({ start: 0, end: d })),
+    prefetch: false,
+    ioSizeMax: BigInt(16 * 2 ** 20),
+    ioSizeMerge: BigInt(256 * 1024),
+    signal,
+  });
   const values = new Float32Array(data);
   // Open-Meteo's global grids are [lat, lon], south to north from 90°S and
   // west to east from 180°W, with square cells.
@@ -204,12 +243,23 @@ async function omJob({ url, variable }) {
 
 const JOBS = { om: omJob, compute: computeJob, split: splitJob, sum: sumJob, grib: gribJob };
 
-self.onmessage = async ({ data: { id, job } }) => {
+// Downloads of jobs still running, so the main thread can cancel them (the view changed).
+const controllers = new Map();
+
+self.onmessage = async ({ data: { id, job, cancel } }) => {
+  if (cancel) {
+    controllers.get(cancel)?.abort();
+    return;
+  }
+  const ctl = new AbortController();
+  controllers.set(id, ctl);
   try {
-    const res = await (JOBS[job.kind] ?? gribJob)(job);
+    const res = await (JOBS[job.kind] ?? gribJob)({ ...job, signal: ctl.signal });
     const transfer = [...res.fields.map((f) => f.values.buffer), ...(res.parts ?? []).map((b) => b.buffer), ...(res.raw ?? []).filter(Boolean).map((b) => b.buffer)];
     self.postMessage({ id, ...res }, transfer);
   } catch (err) {
-    self.postMessage({ id, error: err.message || String(err) });
+    self.postMessage({ id, error: ctl.signal.aborted ? 'cancelled' : err.message || String(err) });
+  } finally {
+    controllers.delete(id);
   }
 };

@@ -347,6 +347,11 @@ select option {
   background: transparent;
   color: #c9d2de;
 }
+/* In another run of the same model (RRFS full runs): a click switches to it. */
+.product.unavailable.elsewhere {
+  opacity: 0.5;
+  cursor: pointer;
+}
 .product .swatch {
   height: 8px;
   border-radius: 4px;
@@ -988,25 +993,185 @@ canvas.picking {
   color: #ff9c8a;
 }
 
-/* SharpJS draws at 18:12; the panel is sized so the whole chart fits under the header. */
+/* Sounding: skew-T and hodograph across the top, a strip of parameter tables
+   underneath (parcels and thermodynamics, kinematics, composites, SR wind,
+   hazard), in the spirit of SHARPpy's layout. */
 .sounding-panel {
-  top: 64px;
-  right: 60px;
-  width: min(1180px, calc(100vw - 88px), calc((100vh - 150px) * 1.5));
+  top: 58px;
+  right: 58px;
+  width: min(1560px, calc(100vw - 86px));
+  height: min(1000px, calc(100vh - 78px));
 }
-.sjs-body {
+.snd-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 6px;
   padding: 6px;
-  background: #000;
+  background: #05080d;
 }
-.sjs-host .sharpjs {
-  --sjs-font: inherit;
-  --sjs-accent: var(--accent);
+.snd-top {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 6px;
 }
-.sjs-host .sjs-viz {
+.snd-skewt,
+.snd-hodo,
+.snd-srw-box {
+  position: relative;
+  min-height: 0;
   border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--stroke);
 }
-.sjs-host .sjs-empty {
+.snd-skewt canvas,
+.snd-hodo canvas,
+.snd-srw-box canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.snd-skewt canvas {
+  cursor: crosshair;
+}
+.snd-bottom {
+  display: grid;
+  grid-template-columns: minmax(330px, 1.55fr) minmax(220px, 0.95fr) minmax(150px, 0.62fr) minmax(130px, 0.6fr) minmax(118px, 0.48fr);
+  gap: 6px;
+  height: 236px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.snd-block {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden auto;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.02);
+}
+.snd-srw {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.snd-srw-box {
+  flex: 1;
+  border: 0;
+}
+.snd-block-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--muted);
+  margin: 2px 0 3px;
+}
+.snd-block-title.gen {
+  color: #f1c84a;
+}
+.snd-block-title.tor {
+  color: #ff7a6b;
+  margin-top: 8px;
+}
+.snd-grid {
+  width: 100%;
+  border-collapse: collapse;
+}
+.snd-grid th,
+.snd-grid td {
+  padding: 3px 5px;
+  text-align: right;
+  white-space: nowrap;
+}
+.snd-grid thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 10.5px;
+  border-bottom: 1px solid var(--stroke-strong);
+}
+.snd-grid tbody th {
+  text-align: left;
+  font-weight: 700;
+  color: #c9d2de;
+}
+.snd-grid tbody tr + tr {
+  border-top: 1px solid var(--stroke);
+}
+.snd-grid tr.eff th {
+  color: var(--accent);
+}
+.snd-parcels tbody tr {
+  cursor: pointer;
+}
+.snd-parcels tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.snd-parcels tbody tr.sel {
+  background: var(--accent-soft);
+}
+.snd-cols {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 14px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--stroke-strong);
+}
+.snd-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+}
+.snd-kv dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.snd-kv dd {
+  margin: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+.snd-note {
+  margin-top: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.snd-bottom .mid {
+  color: #f1c84a;
+}
+.snd-bottom .hi {
+  color: #ff7a6b;
+  font-weight: 650;
+}
+.snd-bottom .cold {
+  color: #8ab4ff;
+}
+.snd-hazards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.snd-hazards li {
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 5px;
+  text-align: center;
+  color: var(--faint);
+  border: 1px solid transparent;
+}
+.snd-hazards li.on {
+  color: #0b0f14;
+  font-weight: 700;
+  background: #f1c84a;
 }
 
 .xsect-panel {
@@ -1020,6 +1185,18 @@ body.panel-hidden .xsect-panel {
 }
 .xs-wrap {
   flex: 1;
+  position: relative;
+  min-height: 0;
+}
+.xs-wrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.radar-xsect-panel canvas {
+  cursor: crosshair;
 }
 
 /* ------------------------------------------------------------------ radar */
@@ -1811,11 +1988,43 @@ body.radar-3d #labels {
   .sounding-panel {
     inset: calc(var(--gap) + var(--sa-t)) calc(var(--gap) + var(--sa-r)) calc(var(--gap) + var(--sa-b)) calc(var(--gap) + var(--sa-l));
     width: auto;
+    height: auto;
   }
-  .sjs-body {
-    flex: 1;
-    min-height: 0;
+  /* Phones: one column that scrolls: skew-T, hodograph, then the tables. */
+  .snd-body {
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
+  }
+  .snd-top {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+  }
+  .snd-skewt {
+    flex: 0 0 auto;
+    height: min(560px, 66dvh);
+  }
+  .snd-hodo {
+    flex: 0 0 auto;
+    aspect-ratio: 1;
+    width: min(420px, 100%);
+    align-self: center;
+  }
+  .snd-bottom {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+  }
+  .snd-block {
+    overflow: visible;
+  }
+  .snd-srw-box {
+    height: 180px;
+    flex: 0 0 auto;
+  }
+  .snd-cols {
+    grid-template-columns: 1fr;
   }
   .xsect-panel,
   body.panel-hidden .xsect-panel {

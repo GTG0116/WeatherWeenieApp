@@ -243,6 +243,34 @@ export class RadarSource {
     return !!this.volumes?.has(volumeKey(url, moment, box));
   }
 
+  /**
+   * Values along a vertical cross section from a to b ({x, y} km east / north
+   * of the radar), through every tilt of a Level II volume (see worker.js).
+   * Goes to the worker the volume's 3D view uses, which keeps the decoded volume.
+   */
+  section(url, moment, a, b) {
+    const key = `${url}#${moment}#${[a.x, a.y, b.x, b.y].map((v) => v.toFixed(2))}`;
+    this.sections ??= new Map();
+    if (this.sections.has(key)) return this.sections.get(key);
+    let hash = 0;
+    for (let i = 0; i < url.length; i++) hash = (hash * 31 + url.charCodeAt(i)) | 0;
+    const p = this.#run({ section: true, url, moment, a, b }, Math.abs(hash) % this.workers.length);
+    p.catch(() => this.sections.delete(key));
+    this.sections.set(key, p);
+    while (this.sections.size > 24) this.sections.delete(this.sections.keys().next().value);
+    return p;
+  }
+
+  /** Let go of every decoded sweep and volume (leaving radar for the models). */
+  clear() {
+    this.cache.clear();
+    this.sizes.clear();
+    this.bytes = 0;
+    this.volumes?.clear();
+    this.sections?.clear();
+    this.workers.forEach((w) => w.postMessage({ id: 0, job: { forget: true } }));
+  }
+
   #evict() {
     for (const key of this.cache.keys()) {
       if (this.bytes <= CACHE_BYTES) break;

@@ -239,6 +239,67 @@ function resampleVolume(vol, vmin, vmax, box) {
   };
 }
 
+// Cross sections: a vertical slice from a to b (km east / north of the radar),
+// every SECTION_DZ_KM up to SECTION_TOP_KM, one column per ~quarter km along the
+// line (at most SECTION_MAX_COLS). Between two tilts the value is interpolated in
+// elevation; above the top / below the lowest tilt, gates reach half a beam width.
+const SECTION_TOP_KM = 20;
+const SECTION_DZ_KM = 0.1;
+const SECTION_MAX_COLS = 800;
+
+/** @returns {{values: Float32Array, nx: number, nz: number, lengthKm: number, topKm: number, angles: number[], siteKm: number}} */
+function sectionVolume(vol, a, b) {
+  const lengthKm = Math.max(0.5, Math.hypot(b.x - a.x, b.y - a.y));
+  const nx = Math.max(2, Math.min(SECTION_MAX_COLS, Math.round(lengthKm / 0.25)));
+  const nz = Math.round(SECTION_TOP_KM / SECTION_DZ_KM);
+  const tilts = vol.tilts;
+  const angles = tilts.map((t) => t.elevation);
+  const nt = tilts.length;
+  const siteKm = (vol.heightM ?? 0) / 1000;
+  // NaN: no data; Infinity: range folded (velocity).
+  const values = new Float32Array(nx * nz).fill(NaN);
+  const rows = new Int32Array(nt);
+  const sample = (t, r) => {
+    const s = tilts[t];
+    const row = rows[t];
+    if (row < 0) return NaN;
+    const g = Math.floor((r - s.firstGateKm) / s.gateKm + 0.5);
+    if (g < 0 || g >= s.nGates) return NaN;
+    return s.values[row * s.nGates + g];
+  };
+  for (let i = 0; i < nx; i++) {
+    const f = (i + 0.5) / nx;
+    const x = a.x + (b.x - a.x) * f;
+    const y = a.y + (b.y - a.y) * f;
+    const s = Math.hypot(x, y);
+    const azBin = Math.min(AZ_BINS - 1, Math.floor((((Math.atan2(x, y) / D2R) + 360) % 360) * 10));
+    for (let t = 0; t < nt; t++) rows[t] = tilts[t].lut[azBin];
+    const phi = s / KE_R;
+    const sin = Math.sin(phi);
+    const cos = Math.cos(phi);
+    for (let k = 0; k < nz; k++) {
+      const hk = (k + 0.5) * SECTION_DZ_KM - siteKm; // above the antenna
+      if (hk < 0) continue;
+      const px = (KE_R + hk) * sin;
+      const py = (KE_R + hk) * cos - KE_R;
+      const r = Math.hypot(px, py);
+      const el = Math.atan2(py, px) / D2R;
+      if (el < angles[0] - BEAM_HALF_DEG || el > angles[nt - 1] + BEAM_HALF_DEG) continue;
+      let hi = 0;
+      while (hi < nt && angles[hi] < el) hi++;
+      const lo = hi - 1;
+      const va = lo >= 0 ? sample(lo, r) : NaN;
+      const vb = hi < nt ? sample(hi, r) : NaN;
+      let v = NaN;
+      if (Number.isFinite(va) && Number.isFinite(vb)) v = va + ((vb - va) * (el - angles[lo])) / (angles[hi] - angles[lo] || 1);
+      else if (va === va && lo >= 0 && (el - angles[lo] <= BEAM_HALF_DEG || vb === vb)) v = va; // folded or a lone tilt
+      else if (vb === vb && hi < nt && angles[hi] - el <= BEAM_HALF_DEG) v = vb;
+      if (v === v) values[k * nx + i] = v;
+    }
+  }
+  return { values, nx, nz, lengthKm, topKm: SECTION_TOP_KM, angles, siteKm };
+}
+
 /**
  * [1 2 1] blurs across each level, value and coverage alike (so the value the
  * GPU reads, value / coverage, stays an average of real gates only). Takes the
@@ -292,8 +353,18 @@ async function level2Range(url, from, to) {
 }
 
 self.onmessage = async ({ data: { id, job } }) => {
+  if (job.forget) {
+    lastVolume = null;
+    return;
+  }
   try {
     let frame;
+    if (job.section) {
+      const vol = await decodeVolume(job.url, job.moment);
+      const out = { lat: vol.lat, lon: vol.lon, heightM: vol.heightM, vcp: vol.vcp, time: vol.time, ...sectionVolume(vol, job.a, job.b) };
+      self.postMessage({ id, frame: out }, [out.values.buffer]);
+      return;
+    }
     if (job.volume) {
       const vol = await decodeVolume(job.url, job.moment);
       const grid = resampleVolume(vol, job.vmin, job.vmax, job.box);

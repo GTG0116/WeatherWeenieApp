@@ -174,6 +174,59 @@ const refsMember = (m) => `m${p3(m)}`; // REFS members 1..5 → m001..m005
 const NCEP_ENS_LEVELS = [1000, 925, 850, 700, 500, 300, 250, 200, 100, 50, 10];
 const NO_300 = NCEP_ENS_LEVELS.filter((l) => l !== 300); // GEFS/GEPS publish no 300 hPa temperature
 
+// ---------------------------------------------------------------- RRFS
+const RRFS_BUCKET = 'https://noaa-rrfs-ops-pds.s3.amazonaws.com';
+// Full output, every 3 hours: hourly to 84 h at 00/06/12/18 UTC, 18 h at 03/09/15/21 UTC.
+const RRFS_FULL = ncepSource({
+  bucket: RRFS_BUCKET,
+  files: {
+    sfc: (r, s) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.f${p3(s)}.conus.grib2`,
+    prs: (r, s) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.prslev.3km.f${p3(s)}.conus.grib2`,
+  },
+  listing: {
+    sfc: { prefix: (r) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.f`, re: /\.f(\d{3})\.conus\.grib2\.idx$/ },
+    prs: { prefix: (r) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.prslev.3km.f`, re: /\.f(\d{3})\.conus\.grib2\.idx$/ },
+  },
+  cycle: 3,
+  search: 24,
+  maxRuns: 4,
+  steps: (hour) => range(0, hour % 6 === 0 ? 84 : 18, 1),
+  levels: UPPER,
+  profileLevels: PROFILE_HIRES,
+  params: [...NCEP_SURFACE, ...HIRES_SEVERE, ...NCEP_PTYPE, ...NCEP_UPPER],
+  overrides: { msl: { v: 'MSLET' } },
+  gridRelativeWinds: true,
+  regrid: { res: 0.03 },
+});
+// The hourly cycles in between publish only the sub-hourly surface files
+// (2dfld.subh, F001–F018, each with its 15/30/45 min and whole-hour fields; the
+// whole-hour ones are read): no F000, no upper air, CAPE, helicity or clouds.
+const RRFS_HOURLY = ncepSource({
+  bucket: RRFS_BUCKET,
+  files: { sfc: (r, s) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.subh.f${p3(s)}.conus.grib2` },
+  listing: { sfc: { prefix: (r) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.subh.f`, re: /\.subh\.f(\d{3})\.conus\.grib2\.idx$/ } },
+  cycle: 1,
+  search: 8,
+  maxRuns: 5,
+  steps: (hour) => (hour % 3 === 0 ? [] : range(1, 18, 1)),
+  levels: [],
+  params: ['2t', '2d', '10u', '10v', '10fg', 'msl', 'sp', 'tp', 'tprate', 'refc', ...NCEP_PTYPE],
+  overrides: { msl: { v: 'MSLET' } },
+  gridRelativeWinds: true,
+  regrid: { res: 0.03 },
+});
+
+/** A source that also lists another source's runs, tagged with the model view that reads them. */
+function withRuns(source, extra, view) {
+  return {
+    ...source,
+    runs: async () => {
+      const [own, more] = await Promise.all([source.runs(), extra.runs().catch(() => [])]);
+      return [...own, ...more.map((r) => ({ ...r, view }))].sort((a, b) => (a.id < b.id ? 1 : -1));
+    },
+  };
+}
+
 // ---------------------------------------------------------------- catalogue
 export const MODELS = {
   ifs: {
@@ -277,11 +330,14 @@ export const MODELS = {
         make: ({ t, rh }) => dewpointFromRh(t.values, rh.values),
       },
       vo: vortFromWinds,
-      ptype: { needs: () => ({ c: { param: 'wcode' } }), make: ({ c }) => ptypeFromWmo(c.values) },
+      // The F000 (analysis) file has no precipitation, snowfall or weather code:
+      // totals, rates and types are zero there.
+      ptype: { zeroAtStart: true, needs: () => ({ c: { param: 'wcode' } }), make: ({ c }) => ptypeFromWmo(c.values) },
       // Interval totals summed into totals since F000 (see DataSource).
-      tp: { sum: 'precip', scale: 1e-3 },
-      sf: { sum: 'snowfall', scale: 1e-3 },
+      tp: { sum: 'precip', scale: 1e-3, zeroAtStart: true },
+      sf: { sum: 'snowfall', scale: 1e-3, zeroAtStart: true },
       tprate: {
+        zeroAtStart: true,
         needs: () => ({ p: { param: 'precip' } }),
         make: ({ p }, ctx) => {
           const hours = Math.max(1, ctx.step - ctx.prevStep);
@@ -296,6 +352,8 @@ export const MODELS = {
 
   // Ensembles: `members` lists what can be shown — the mean (published, or
   // averaged here from every member), the control (member 0) and members 1..count.
+  // ENS and AIFS ENS are 'computed' but take ECMWF's own mean for the few fields
+  // it publishes (`publishedMean`, see sources.js).
   gefs: {
     name: 'GEFS',
     label: 'GEFS',
@@ -346,6 +404,7 @@ export const MODELS = {
       dir: 'ifs',
       stream: 'enfo',
       types: ['ef'],
+      publishedMean: true,
       steps: (hour) => [...range(0, 144, 3), ...(hour % 12 === 0 ? range(150, 360, 6) : [])],
       levels: UPPER,
       params: ['2t', '2d', '10u', '10v', '10fg', 'mucape', 'msl', 'sp', 'tp', 'sf', 'tprate', 'ptype', 'tcc', 'lcc', 'mcc', 'hcc', 't', 'gh', 'u', 'v', 'vo', 'r'],
@@ -364,6 +423,7 @@ export const MODELS = {
       dir: 'aifs-ens',
       stream: 'enfo',
       types: ['cf', 'pf'],
+      publishedMean: true,
       steps: () => range(0, 360, 6),
       levels: UPPER,
       params: ['2t', '2d', '10u', '10v', 'msl', 'sp', 'tp', 'sf', 'tcc', 'lcc', 'mcc', 'hcc', 't', 'gh', 'u', 'v', 'q'],
@@ -502,29 +562,15 @@ export const MODELS = {
     regional: true,
     credit: 'NOAA RRFS via AWS Open Data',
     notes: { ltng: 'max over the past hour' },
-    source: ncepSource({
-      bucket: 'https://noaa-rrfs-ops-pds.s3.amazonaws.com',
-      files: {
-        sfc: (r, s) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.f${p3(s)}.conus.grib2`,
-        prs: (r, s) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.prslev.3km.f${p3(s)}.conus.grib2`,
-      },
-      listing: {
-        sfc: { prefix: (r) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.2dfld.3km.f`, re: /\.f(\d{3})\.conus\.grib2\.idx$/ },
-        prs: { prefix: (r) => `rrfs.${r.date}/${r.hh}/rrfs.t${r.hh}z.prslev.3km.f`, re: /\.f(\d{3})\.conus\.grib2\.idx$/ },
-      },
-      cycle: 1,
-      search: 8,
-      maxRuns: 6,
-      steps: (hour) => range(0, hour % 6 === 0 ? 84 : 18, 1),
-      levels: UPPER,
-      profileLevels: PROFILE_HIRES,
-      params: [...NCEP_SURFACE, ...HIRES_SEVERE, ...NCEP_PTYPE, ...NCEP_UPPER],
-      overrides: { msl: { v: 'MSLET' } },
-      gridRelativeWinds: true,
-      regrid: { res: 0.03 },
-    }),
+    // RRFS runs every hour, but only the 00/03/06/.../21 UTC cycles publish full
+    // output (2dfld + prslev); the runs in between are listed with view: 'hourly'
+    // and read through views.hourly below.
+    source: withRuns(RRFS_FULL, RRFS_HOURLY, 'hourly'),
     derived: { vo: vortFromAbsv, ptype: ptypeCategorical, dcape: dcapeFrom(DCAPE_FINE) },
     profile: PROFILE_HIRES,
+    views: {
+      hourly: { source: RRFS_HOURLY, derived: { ptype: ptypeCategorical }, notes: {}, profile: null },
+    },
   },
   rap: {
     name: 'RAP',
@@ -568,16 +614,23 @@ export function membersOf(modelId) {
 
 const memberViews = new Map();
 /**
- * A model's catalogue entry as one ensemble member sees it. Usually the model
- * itself; a model with a `member` section (REFS) reads single members from other
- * files than its mean, with their own params, recipes and sounding levels.
- * @param {string|null} [member] 'mean', '0' control, '1'.., or null
+ * A model's catalogue entry as one ensemble member, or one kind of run, sees it.
+ * Usually the model itself; a model with a `member` section (REFS) reads single
+ * members from other files than its mean, with their own params, recipes and
+ * sounding levels, and a run tagged with a `view` (RRFS's surface-only hourly
+ * runs) reads through that entry of the model's `views`.
+ * @param {string|null} [member] 'mean', '0' control, '1'.., a view name, or null
  */
 export function modelFor(modelId, member) {
   const m = MODELS[modelId];
-  if (!m.member || member == null || member === 'mean') return m;
-  if (!memberViews.has(modelId)) memberViews.set(modelId, { ...m, ...m.member });
-  return memberViews.get(modelId);
+  const key = `${modelId}/${member}`;
+  if (m.views?.[member]) {
+    if (!memberViews.has(key)) memberViews.set(key, { ...m, ...m.views[member] });
+    return memberViews.get(key);
+  }
+  if (!m.member || member == null || !/^\d+$/.test(member)) return m;
+  if (!memberViews.has(key)) memberViews.set(key, { ...m, ...m.member });
+  return memberViews.get(key);
 }
 
 /** Whether a model (or one of its members) has soundings and cross sections (temperature, height, wind and humidity on levels). */

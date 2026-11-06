@@ -20,16 +20,19 @@ const RETRY = new Set([429, 500, 502, 503, 504]);
  */
 export async function fetchRetry(urls, init, tries = 4) {
   const list = Array.isArray(urls) ? urls : [urls];
+  const signal = init?.signal;
   let last = null;
   for (let attempt = 0; attempt < tries; attempt++) {
     let missing = null;
     for (const url of list) {
+      signal?.throwIfAborted(); // cancelled: no retries, no mirrors
       try {
         const res = await fetch(url, init);
         if (res.ok) return res;
         if (!RETRY.has(res.status)) missing ??= res;
         else last = new Error(`HTTP ${res.status} for ${url.split('/').pop()}`);
       } catch (err) {
+        if (signal?.aborted) throw err;
         last = err;
       }
     }
@@ -76,6 +79,7 @@ async function discoverRuns({ cycle, search, maxRuns, expected, stepsOf, cache }
     const batch = await Promise.all(
       candidates.slice(i, i + 3).map(async (run) => {
         const want = expected(run.hour);
+        if (!want.length) return null; // this source has nothing at this hour
         const hit = cache.get(run.id);
         // Finished runs never change; re-list unfinished ones at most every 90 s.
         if (hit && (hit.complete || now - hit.checked < 90e3)) return hit;
@@ -270,16 +274,26 @@ const ECMWF_MIRRORS = ['https://storage.googleapis.com/ecmwf-open-data', 'https:
 // Cloud cover in % under WMO codes (AIFS); ECMWF's local codes (IFS) are fractions.
 const PERCENT_CLOUD = new Set([1, 3, 4, 5]);
 
+// The ensembles' ECMWF-computed mean ('em', the Set X / Set III ensemble-mean
+// products) rides along in the probability ('ep') files, published once the whole
+// run is done: the 240 h file carries steps 0–240, the 360 h file 246–360. Only
+// a few fields (MSLP, T 250/500/850, Z 300/500/1000, AIFS 2 m temperature); the
+// rest of an ensemble mean is still averaged locally from the members.
+const MEAN_FILES = [240, 360];
+const MEAN_RECHECK = 10 * 60e3; // look for the files again this often while they're missing
+
 /**
  * @param {object} cfg
  * @param {string} cfg.dir 'ifs', 'aifs-single', 'aifs-ens'
  * @param {'oper'|'enfo'} [cfg.stream]
  * @param {string[]} [cfg.types] file types per step: ['fc'] (oper), ['ef'] (IFS ENS), ['cf', 'pf'] (AIFS ENS)
  * @param {Record<string, {param: string, scale: number}>} [cfg.aliases] canonical param → published param
+ * @param {boolean} [cfg.publishedMean] use ECMWF's own ensemble mean where it exists (see MEAN_FILES)
  */
-export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, levels, params, aliases = {} }) {
+export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, levels, params, aliases = {}, publishedMean = false }) {
   const idxCache = new Map();
   const runCache = new Map();
+  const meanCache = new Map();
   const runDir = (date, hh) => `${date}/${hh}z/${dir}/0p25/${stream}`;
   const stem = (runId, step, type) => {
     const date = runId.slice(0, 8);
@@ -314,8 +328,48 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
     return idxCache.get(key);
   };
   const gribJob = (runId, step, e) => {
-    const [url, ...alt] = mirrors(`${stem(runId, step, e.type)}.grib2`);
+    const [url, ...alt] = mirrors(`${stem(runId, e.file ?? step, e.type)}.grib2`);
     return { kind: 'grib', url, alt, range: [e.offset, e.offset + e.length - 1] };
+  };
+  /** The 'em' entries of one 'ep' file, or null while it isn't published (checked again after MEAN_RECHECK). */
+  const meanIndex = (runId, file) => {
+    const key = `${runId}/${file}`;
+    const hit = meanCache.get(key);
+    if (hit && (hit.found || Date.now() - hit.at < MEAN_RECHECK)) return hit.p;
+    const entry = { at: Date.now(), found: false, p: null };
+    entry.p = fetchRetry(mirrors(`${stem(runId, file, 'ep')}.index`))
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const list = (await res.text())
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .filter((e) => e.type === 'em')
+          .map((e) => ({
+            param: e.param,
+            levtype: e.levtype,
+            level: e.levelist ?? null,
+            step: Number(e.step),
+            type: 'ep',
+            file,
+            offset: e._offset,
+            length: e._length,
+          }));
+        entry.found = true;
+        return list;
+      })
+      .catch(() => null);
+    meanCache.set(key, entry);
+    while (meanCache.size > 16) meanCache.delete(meanCache.keys().next().value);
+    return entry.p;
+  };
+  /** ECMWF's own ensemble mean of a field, if published for this run and step. */
+  const meanEntry = async (runId, step, src, levtype, level) => {
+    const file = MEAN_FILES.find((s) => step <= s);
+    // Runs that stop short of the file's step (IFS ENS 06/18 UTC, 144 h) have no 'ep' files.
+    if (!publishedMean || file == null || !steps(Number(runId.slice(8, 10))).includes(file)) return null;
+    const list = await meanIndex(runId, file);
+    return list?.find((x) => x.step === step && x.param === src && x.levtype === levtype && (level ? x.level === String(level) : true)) ?? null;
   };
   return {
     levels,
@@ -329,11 +383,15 @@ export function ecmwfSource({ dir, stream = 'oper', types = ['fc'], steps, level
         if (f !== 1) for (let i = 0; i < v.length; i++) v[i] *= f;
       };
     },
-    /** member: null (deterministic), 'mean' (all members, averaged locally), or a member number. */
+    /** member: null (deterministic), 'mean' (ECMWF's published mean, else all members averaged locally), or a member number. */
     async job(runId, step, param, level, member = null) {
-      const entries = await index(runId, step);
       const src = aliases[param]?.param ?? param;
       const levtype = level ? 'pl' : 'sfc';
+      if (member === 'mean') {
+        const em = await meanEntry(runId, step, src, levtype, level);
+        if (em) return gribJob(runId, step, em);
+      }
+      const entries = await index(runId, step);
       const all = entries.filter((x) => x.param === src && x.levtype === levtype && (level ? x.level === String(level) : true));
       const what = `${param}${level ? ' @' + level : ''}`;
       if (member === 'mean') {

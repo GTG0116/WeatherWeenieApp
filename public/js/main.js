@@ -2,7 +2,7 @@ import { Globe } from './globe/globe.js';
 import { WindParticles } from './globe/particles.js';
 import { LabelLayer, contourLabelCandidates } from './globe/labels.js';
 import { DataSource, sampleField, sampleNearest } from './data.js';
-import { Accumulator } from './accum.js';
+import { Accumulator, KINDS } from './accum.js';
 import { PRODUCTS, PTYPE_CATEGORY, PTYPE_NAMES, accumulationOf, isobarContour, productAvailable, productById } from './products.js';
 import { PRECIP_TYPES } from './colormaps.js';
 import { unitFor } from './units.js';
@@ -14,6 +14,7 @@ import { RadarView } from './radar/view.js';
 import { PTYPE_UNKNOWN, radarProductById } from './radar/products.js';
 import { STALE_MS, ago } from './radar/source.js';
 import { Radar3D } from './radar/volume.js';
+import { RadarSectionPanel } from './radar/xsect.js';
 
 const $ = (sel) => document.querySelector(sel);
 const STORE_KEY = 'model-globe-state-v1';
@@ -97,14 +98,17 @@ const radarMode = () => state.mode === 'radar';
 const frameCount = () => (radarMode() ? radar.frames.length : steps().length);
 const step = () => steps()[state.stepIndex] ?? 0;
 const runTime = (run) => Date.UTC(+run.date.slice(0, 4), +run.date.slice(4, 6) - 1, +run.date.slice(6, 8), run.hour);
-const hasIsobars = (p, model = state.model) => !!p.isobars && supports(model, 'msl', undefined, state.member);
+// How the data layer reads the current selection: an ensemble member, or a kind of
+// run that publishes fewer fields (RRFS's surface-only hourly runs), or null.
+const viewOf = (run = state.run) => state.member ?? run?.view ?? null;
+const hasIsobars = (p, model = state.model) => !!p.isobars && supports(model, 'msl', undefined, viewOf());
 const isobarsOn = (p) => hasIsobars(p) && (state.overlays.isobars ?? !!p.isobarsDefault);
 const cityValuesOn = (p) => state.cityValues[p.id] ?? !!p.cityValues;
-const available = (p, model = state.model) => productAvailable(p, model, undefined, state.member);
+const available = (p, model = state.model, view = viewOf()) => productAvailable(p, model, undefined, view);
 const accumulation = (p = product()) => accumulationOf(p, state.model);
 const modelName = (model = state.model) => MODELS[model].name;
-// The run as the data layer sees it: ensemble members are cached under "run~member".
-const runKey = () => (state.member ? `${state.run.id}~${state.member}` : state.run.id);
+// The run as the data layer sees it: ensemble members (and run views) are cached under "run~member".
+const runKey = () => (viewOf() ? `${state.run.id}~${viewOf()}` : state.run.id);
 const dataRun = () => ({ ...state.run, id: runKey() });
 const memberName = () =>
   !state.member ? '' : state.member === 'mean' ? ' mean' : state.member === '0' ? ' control' : ` member ${state.member}`;
@@ -219,7 +223,7 @@ const analysisContext = () => {
   const r = state.run;
   return {
     model: state.model,
-    member: state.member,
+    member: viewOf(),
     run: runKey(),
     step: step(),
     nextStep: steps()[state.stepIndex + 1] ?? null, // prefetched while a panel is open
@@ -236,15 +240,37 @@ const TOOL_HINTS = {
 const tools = new MapTools(globe, $('#stage'), {
   onPoint: (ll) => sounding.open({ kind: 'point', lat: ll.lat, lon: ll.lon }),
   onBox: (box) => sounding.open({ kind: 'box', box }),
-  onLine: (a, b) => xsect.open(a, b),
+  // In radar mode a line slices the radar's volume; otherwise the model's levels.
+  onLine: (a, b) => (radarMode() ? openRadarSection(a, b) : xsect.open(a, b)),
   onModeChange: (mode) => {
     document.querySelectorAll('#map-tools .tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === mode));
     $('#tool-hint').hidden = !mode;
-    $('#tool-hint').textContent = TOOL_HINTS[mode] ?? '';
+    $('#tool-hint').textContent = radarMode() && mode === 'line' ? 'Click the start, then the end of the radar cross section · Esc to cancel' : TOOL_HINTS[mode] ?? '';
   },
 });
 const sounding = new SoundingPanel({ data, context: analysisContext, onClose: () => tools.clearShape('sounding') });
 const xsect = new CrossSectionPanel({ data, context: analysisContext, onClose: () => tools.clearShape('xsect') });
+const radarXsect = new RadarSectionPanel({ source: radar.source, units: () => state.units, onClose: () => tools.clearShape('xsect') });
+radarXsect.onSwap = (a, b) => tools.setShape('xsect', { kind: 'line', a, b });
+
+/** Radar cross section along a line, through the volume of the frame on screen. */
+function openRadarSection(a, b) {
+  radarXsect.open(a, b);
+  const f = radar.frames[state.stepIndex];
+  if (radar.site && f) radarXsect.update(radar.site, radar.product, f.time);
+}
+
+/**
+ * Memory holds the whole run of the product on screen and nothing else: other
+ * models, runs, members and products are dropped as soon as the view changes
+ * (and their background loading is cancelled). See DataSource.retain.
+ */
+function retainView(p = product(), opt = option()) {
+  const kind = accumulation(p);
+  const specs = Object.values(kind ? KINDS[kind].needs(state.model) : inputSpec(p, opt));
+  data.retain({ model: state.model, run: runKey(), specs });
+  accum.retain(kind ? `${kind}/${state.model}/${runKey()}` : null);
+}
 
 let panelTimer = null;
 /** Follow the map: reload open panels for the new hour, model or member (not while playing). */
@@ -368,7 +394,7 @@ function buildProducts() {
       b.className = 'product';
       b.dataset.id = p.id;
       b.innerHTML = `<span class="name">${p.name}</span><span class="swatch" style="background:${swatchCss(p)}"></span>`;
-      b.addEventListener('click', () => available(p) && selectProduct(p.id));
+      b.addEventListener('click', () => (available(p) ? selectProduct(p.id) : selectProductInOtherRun(p)));
       list.appendChild(b);
     }
   }
@@ -389,7 +415,7 @@ function buildOptions() {
   $(`#products-${p.group}`).closest('.block').after(block);
   for (const o of opts) {
     const b = document.createElement('button');
-    const ok = !p.options || productAvailable(p, state.model, o.value, state.member);
+    const ok = !p.options || productAvailable(p, state.model, o.value, viewOf());
     b.className = 'pill' + (p.options && o.value === option() ? ' active' : '') + (ok ? '' : ' unavailable');
     b.textContent = o.label;
     b.disabled = !ok;
@@ -455,26 +481,40 @@ function syncProductButtons() {
     const ok = available(p);
     b.classList.toggle('active', b.dataset.id === state.productId);
     b.classList.toggle('unavailable', !ok);
-    b.title = ok ? '' : `Not available from ${modelName()}`;
+    const elsewhere = !ok && !!state.run?.view && !radarMode() && available(p, state.model, state.member);
+    b.classList.toggle('elsewhere', elsewhere);
+    b.title = ok
+      ? ''
+      : elsewhere
+        ? `Not in ${modelName()}'s surface-only hourly runs: click for the latest full run`
+        : `Not available from ${modelName()}`;
   });
   document.querySelectorAll('#models button').forEach((b) => b.classList.toggle('active', b.dataset.model === state.model));
   document.querySelectorAll('#mode-switch button').forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
   $('.brand-sub').textContent = radarMode() ? 'NEXRAD & TDWR radar' : 'Global NWP viewer';
   $('#credit').textContent = radarMode() ? 'NOAA NEXRAD & TDWR Level II/III (Unidata on AWS), NWS radar status' : MODELS[state.model].credit;
-  const profiles = hasProfiles(state.model, state.member) && !radarMode();
+  const profiles = hasProfiles(state.model, viewOf()) && !radarMode();
   tools.enabled = profiles;
   document.querySelectorAll('#map-tools .tool').forEach((b) => {
+    b.dataset.title ??= b.title;
+    // Radar: the line tool slices the radar's volume (soundings come from the right-click menu).
+    if (radarMode()) {
+      const ok = b.dataset.tool === 'line';
+      b.disabled = !ok;
+      b.title = ok ? 'Radar cross section: click the start and end (X)' : `${b.dataset.title} — in radar mode, right-click for an HRRR sounding`;
+      return;
+    }
     b.disabled = !profiles;
-    b.title = profiles ? b.title.replace(/ — not available.*$/, '') : `${b.title.replace(/ — not available.*$/, '')} — not available for ${modelName()}`;
+    b.title = profiles ? b.dataset.title : `${b.dataset.title} — not available for ${modelName()}${state.run?.view ? ' surface-only runs' : ''}`;
   });
-  if (!profiles && tools.mode) tools.setMode(null);
+  if (tools.mode && (radarMode() ? tools.mode !== 'line' : !profiles)) tools.setMode(null);
 }
 
 /** Keep the product's option valid for the current model (e.g. 10 hPa isn't in every model). */
 function fixOption() {
   const p = product();
-  if (!p.options || productAvailable(p, state.model, option(), state.member)) return;
-  const ok = p.options.filter((o) => productAvailable(p, state.model, o.value, state.member));
+  if (!p.options || productAvailable(p, state.model, option(), viewOf())) return;
+  const ok = p.options.filter((o) => productAvailable(p, state.model, o.value, viewOf()));
   if (!ok.length) return;
   const levels = typeof ok[0].value === 'number';
   state.options[p.id] = levels
@@ -497,6 +537,9 @@ async function setModel(model) {
   const prevStep = state.run ? step() : 0;
   const wasRegional = !!MODELS[state.model].regional;
   state.model = model;
+  // Renders and preloads still running belong to the old model (and its run's
+  // steps): retire them before the new model's runs are listed.
+  renderSeq++;
   state.member = membersOf(model).length ? savedMember(model) : null;
   if (!available(product())) state.productId = 't2m';
   fixOption();
@@ -525,6 +568,9 @@ async function enterRadar() {
   if (tools.mode) tools.setMode(null);
   sounding.close();
   xsect.close();
+  // Radar needs no model fields (but the HRRR's precipitation type, loaded afresh).
+  data.retain(null);
+  accum.retain(null);
   particles.clear();
   particles.setEnabled(false);
   labels.setContourLabels([]);
@@ -550,11 +596,29 @@ async function enterRadar() {
 function leaveRadar() {
   state.mode = 'model';
   radar3d.toggle(false);
+  radarXsect.close();
+  sounding.close();
+  if (tools.mode) tools.setMode(null);
   radar.deactivate();
+  // Decoded scans and volumes aren't needed until radar is opened again.
+  radar.source.clear();
+  hrrr.ptype = null;
   setPlaying(false);
   current = null;
   globe.clearLayer();
   persist();
+}
+
+/** A product this kind of run lacks (RRFS's surface-only hourly runs): switch to the newest run that has it. */
+function selectProductInOtherRun(p) {
+  if (radarMode() || !state.run) return;
+  const run = state.runs.find((r) => r.steps.length && available(p, state.model, viewOf(r)));
+  if (!run) return;
+  $('#run-select').value = run.id;
+  setRun(run, step());
+  state.productId = p.id;
+  syncView();
+  render();
 }
 
 function selectProduct(id) {
@@ -583,6 +647,7 @@ function buildUnits() {
       }
       sounding.setUnits(state.units);
       xsect.setUnits(state.units);
+      radarXsect.setUnits(state.units);
       radar3d.sync();
     };
   });
@@ -593,7 +658,7 @@ function fmtRun(r) {
   const d = new Date(runTime(r));
   const day = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
   const last = r.steps[r.steps.length - 1];
-  return `${String(r.hour).padStart(2, '0')}Z ${day} · F${last}${r.complete ? '' : ' (in progress)'}`;
+  return `${String(r.hour).padStart(2, '0')}Z ${day} · F${last}${r.view ? ' · surface only' : ''}${r.complete ? '' : ' (in progress)'}`;
 }
 
 async function loadRuns(keepSelection = false, prevStep = step()) {
@@ -605,13 +670,28 @@ async function loadRuns(keepSelection = false, prevStep = step()) {
   state.runs = runs;
   const sel = $('#run-select');
   sel.innerHTML = runs.map((r) => `<option value="${r.id}">${fmtRun(r)}</option>`).join('');
-  // Default to the newest run that's far enough along to be useful.
+  // Default to the newest run that's far enough along to be useful and can show
+  // the product on screen (RRFS's hourly runs have surface fields only).
+  const ready = (r) => r.steps.length >= Math.min(24, r.expected.length);
   const run =
     (keepSelection && runs.find((r) => r.id === prevId)) ||
-    runs.find((r) => r.steps.length >= Math.min(24, r.expected.length)) ||
+    runs.find((r) => ready(r) && available(product(), model, viewOf(r))) ||
+    runs.find(ready) ||
     runs[0];
   sel.value = run.id;
+  const view = viewOf();
   setRun(run, prevStep);
+  if (viewOf() !== view) syncView();
+}
+
+/** After the member or the kind of run changed: keep the product and menus to what it publishes. */
+function syncView() {
+  if (!available(product())) state.productId = 't2m';
+  fixOption();
+  persist();
+  syncProductButtons();
+  buildOptions();
+  buildOverlays();
 }
 
 function setRun(run, preferStep = 0) {
@@ -856,6 +936,7 @@ async function doRadarRender(seq) {
   else setStatus(ms > 60 ? `Decoded ${site.id} ${p.short} locally · ${Math.round(ms)} ms` : 'Ready', 'done');
   markCached();
   radar3d.update(site, p, frame.time);
+  if (radarXsect.isOpen) radarXsect.update(site, p, frame.time);
   if (!state.playing && radar.frames.some((f) => !radar.source.has(f))) {
     radar.preload().then((done) => {
       if (done && seq === renderSeq && !state.playing) {
@@ -875,6 +956,7 @@ async function doRender(seq) {
   const st = step();
   const spec = inputSpec(p, opt);
   data.focusStep = st;
+  retainView(p, opt);
   $('#title').textContent = `${modelName(model)}${memberName()} · ${p.title(opt, model)}`;
   const kind = accumulation(p);
   const n = Object.keys(spec).length;
@@ -1221,13 +1303,20 @@ function openRadarMenu(x, y, ll) {
     (near
       ? `<button data-act="site" role="menuitem">Switch to ${near.site.id}<span class="sub">Nearest NEXRAD · ${near.site.name}, ${dist(near.km)} away${near.site.id === state.radar.site ? ' · already on it' : ''}</span></button>`
       : '') +
-    `<button data-act="sounding" role="menuitem">HRRR sounding here<span class="sub">Latest HRRR analysis (F000)</span></button>`;
+    `<button data-act="sounding" role="menuitem">HRRR sounding here<span class="sub">Latest HRRR analysis (F000)</span></button>` +
+    (radar.site?.type === 'WSR-88D'
+      ? `<button data-act="xsect" role="menuitem">Cross section from here<span class="sub">Then click where it ends · ${radar.site.id} Level II volume</span></button>`
+      : '');
   menu.hidden = false;
   menu.style.left = `${Math.min(x, window.innerWidth - menu.offsetWidth - 8)}px`;
   menu.style.top = `${Math.min(y, window.innerHeight - menu.offsetHeight - 8)}px`;
   menu.querySelector('[data-act=site]')?.addEventListener('click', () => {
     closeRadarMenu();
     radar.selectSite(near.site.id, false);
+  });
+  menu.querySelector('[data-act=xsect]')?.addEventListener('click', () => {
+    closeRadarMenu();
+    tools.startLine(ll);
   });
   menu.querySelector('[data-act=sounding]').addEventListener('click', async () => {
     closeRadarMenu();
@@ -1353,19 +1442,16 @@ function bindSheet(showPanel) {
 function bindEvents() {
   $('#run-select').addEventListener('change', (e) => {
     const run = state.runs.find((r) => r.id === e.target.value);
+    const view = viewOf();
     setRun(run, step());
+    if (viewOf() !== view) syncView();
     render();
   });
   $('#member-select').addEventListener('change', (e) => {
     state.member = e.target.value;
     state.members[state.model] = state.member;
     // A member can publish other fields than the mean (REFS members have levels, helicity, ...).
-    if (!available(product())) state.productId = 't2m';
-    fixOption();
-    persist();
-    syncProductButtons();
-    buildOptions();
-    buildOverlays();
+    syncView();
     render();
   });
   $('#step').addEventListener('input', (e) => setStep(Number(e.target.value)));
@@ -1451,7 +1537,7 @@ function bindEvents() {
       lastPointer = null;
       refreshTooltip();
       if (radarMode()) openRadarMenu(x, y, ll);
-      else if (hasProfiles(state.model, state.member)) tools.soundingAt(ll);
+      else if (hasProfiles(state.model, viewOf())) tools.soundingAt(ll);
       else return false;
       return true;
     },
@@ -1481,6 +1567,7 @@ function bindEvents() {
     if (e.key === 'Escape' && !$('#radar-menu').hidden) closeRadarMenu();
     else if (e.key === 'Escape') {
       if (tools.mode) tools.setMode(null);
+      else if (radarXsect.isOpen) radarXsect.close();
       else if (xsect.isOpen) xsect.close();
       else sounding.close();
     } else if (radarMode() && key === '3' && plain) {
@@ -1490,7 +1577,9 @@ function bindEvents() {
       if (radar.available(rp)) radar.selectProduct(rp.id);
       else setStatus(`${rp.name} isn't published by ${radar.site?.type === 'TDWR' ? 'TDWR' : 'this'} radar`, 'error');
     } else if (toolKeys[e.key.toLowerCase()] && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (hasProfiles(state.model, state.member) && !radarMode()) tools.toggle(toolKeys[e.key.toLowerCase()]);
+      if (radarMode()) {
+        if (toolKeys[key] === 'line') tools.toggle('line');
+      } else if (hasProfiles(state.model, viewOf())) tools.toggle(toolKeys[key]);
     } else if (e.key === 'ArrowRight') setStep(state.stepIndex + 1);
     else if (e.key === 'ArrowLeft') setStep(state.stepIndex - 1);
     else if (e.key === ' ') setPlaying(!state.playing);

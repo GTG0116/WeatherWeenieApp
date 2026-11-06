@@ -16,7 +16,7 @@ static host. (The one exception is GEPS, which needs a tiny proxy; see below.)
 | AIGFS (NOAA's AI GFS) | Global 0.25° | 6-hourly to 384 h | NOAA `noaa-nws-graphcastgfs-pds` |
 | DWD ICON | Global (Open-Meteo lat/lon grid) | hourly to 78 h, 3-hourly to 180 h | Open-Meteo `openmeteo` bucket |
 | HRRR | CONUS 3 km | hourly to 18 h (48 h at 00/06/12/18 UTC) | NOAA `noaa-hrrr-bdp-pds` |
-| RRFS | CONUS 3 km | hourly to 18 h (84 h at 00/06/12/18 UTC) | NOAA `noaa-rrfs-ops-pds` |
+| RRFS | CONUS 3 km | hourly runs: full output every 3 h (to 84 h at 00/06/12/18 UTC, 18 h at 03/09/15/21 UTC), surface fields only to 18 h in between | NOAA `noaa-rrfs-ops-pds` |
 | RAP | North America 13 km | hourly to 21 h (51 h at 03/09/15/21 UTC) | NOAA `noaa-rap-pds` |
 
 ### Ensembles
@@ -24,14 +24,21 @@ static host. (The one exception is GEPS, which needs a tiny proxy; see below.)
 | Model | Members | Coverage | Steps | Mean | Source |
 | --- | --- | --- | --- | --- | --- |
 | GEFS | control + 30 | Global 0.5° | 3-hourly to 240 h, 6-hourly to 384 h | published | NOAA `noaa-gefs-pds` |
-| ECMWF ENS | 50 | Global 0.25° | 3-hourly to 144 h, 6-hourly to 360 h (00/12 UTC) | averaged in the browser | ECMWF open data, Google Cloud mirror |
-| ECMWF AIFS ENS | control + 50 | Global 0.25° | 6-hourly to 360 h | averaged in the browser | ECMWF open data, Google Cloud mirror |
+| ECMWF ENS | 50 | Global 0.25° | 3-hourly to 144 h, 6-hourly to 360 h (00/12 UTC) | ECMWF's for MSLP, T and Z on a few levels once the run is done; otherwise averaged in the browser | ECMWF open data, Google Cloud mirror |
+| ECMWF AIFS ENS | control + 50 | Global 0.25° | 6-hourly to 360 h | ECMWF's for 2 m temperature, MSLP, T and Z on a few levels once the run is done; otherwise averaged in the browser | ECMWF open data, Google Cloud mirror |
 | CMC GEPS | control + 20 | Global 0.5° | 3-hourly to 192 h, 6-hourly to 384 h | averaged in the browser | MSC Datamart, via a small proxy |
 | REFS | 5 | CONUS 3 km | hourly to 60 h | published (reflectivity as PMM) | NOAA `noaa-rrfs-ops-pds` (members from `rrfsens.*`) |
 
 With an ensemble selected, a **Member** picker appears under the run: the mean (default),
-the control, or any single member. ECMWF's open data has members only, so the ENS and
-AIFS ENS means are averaged here from all 50/51 members (15–30 MB per field). Members are
+the control, or any single member. ECMWF publishes its own ENS and AIFS ENS mean (the `em`
+fields of [Set III](https://www.ecmwf.int/en/forecasts/datasets/set-iii) and
+[Set X](https://www.ecmwf.int/en/forecasts/datasets/set-x)) for only a few fields, packed
+into the open data's probability files (`…-240h-enfo-ep` for steps 0–240,
+`…-360h-enfo-ep` for 246–360) once the whole run is done: mean sea-level pressure,
+temperature at 250/500/850 hPa, geopotential height at 300/500/1000 hPa, and for AIFS ENS
+2 m temperature. Those are read as one small download (about 250 KB). Every other field,
+and these too while the run is still coming in, is averaged here from all 50/51 members
+(15–30 MB per field). Members are
 fetched and summed in batches inside the decode workers, background preloading pauses while
 the hour on screen loads, and finished means are kept in IndexedDB (up to 300 fields), so a
 revisit, a reload or the next session shows them straight away. GEPS files hold all 21
@@ -42,6 +49,13 @@ ensemble's own files (`rrfsens.YYYYMMDD/HH/m001…m005`), which carry much more 
 ensemble mean: every pressure level from 1000 to 250 hPa, 0–1 km helicity, 0–6 km shear,
 gusts, lightning and DCAPE. So a single REFS member has soundings and cross sections, and the
 product list follows the member picked.
+
+RRFS runs every hour, but only the 00/03/06/…/21 UTC cycles publish full output
+(`2dfld` + `prslev`). The cycles in between publish only the sub-hourly surface files
+(`2dfld.subh`, F001–F018), so they're listed as "surface only": temperature, dewpoint, wind,
+gusts, pressure, reflectivity, precipitation and precip type, with no upper air, CAPE,
+helicity, clouds or soundings. A greyed-out product on one of those runs is a click away:
+it switches to the newest full run.
 
 All of these buckets send CORS headers and accept HTTP range requests, which is what lets
 a static page read them directly. ICON comes from Open-Meteo's copy because DWD's own
@@ -86,13 +100,18 @@ DCAPE needs every level at every grid point, so a global frame downloads ~19 fie
 The three tools under the zoom buttons (or keys **S**, **B**, **X**; **Esc** cancels or
 closes):
 
-* **Sounding**: click a point, or just **right-click** the map at any time. Drawn by
-  [SharpJS](https://github.com/DiamondFlight/SharpJS) in the SHARPpy layout: skew-T with
-  SB/ML/MU parcels, DCAPE, effective inflow layer and dendritic growth zone; RH and inferred
-  temperature-advection bars; a hodograph with Bunkers and Corfidi motions; and the full
-  parameter tables (SRH, shear and storm-relative wind by layer, STP, SCP, SHIP, ECAPE, PWAT,
-  winter and fire indices). SB/ML/MU in the panel header picks the parcel drawn; scroll to zoom
-  the skew-T or hodograph. SharpJS is loaded the first time a sounding opens.
+* **Sounding**: click a point, or just **right-click** the map at any time. Drawn by the
+  app itself (`sounding.js`), in a SHARPpy-like layout. Across the top: a skew-T log-p
+  (temperature, dew point, wet bulb, the chosen parcel with its CAPE and CIN shaded,
+  LCL/LFC/EL, heights above ground, the effective inflow layer, wind barbs, and a readout
+  under the pointer) and a hodograph (coloured by layer, a dot per km, Bunkers right/left
+  movers and the 0–6 km mean wind, effective-layer SRH shaded). Along the bottom: SB/ML/MU
+  CAPE, 0–3 and 0–6 km CAPE, CIN, LCL, LFC and EL; lapse rates, PWAT, mean mixing ratio,
+  low/mid RH, DCAPE, freezing and wet-bulb zero levels; bulk shear, SRH and storm-relative
+  wind for 0–0.5, 0–1, 0–3, 0–6, 1–3, 3–6 km and the effective layer; SCP, BRN, significant
+  severe, STP (effective with CIN, and fixed), EHI and effective SRH/shear; storm-relative
+  wind by height; and a rough "possible hazard" guide. SB/ML/MU (header or table rows)
+  picks the parcel drawn, and the download button saves the charts as a PNG.
 * **Box sounding**: click two corners, or **right-drag** a box on the map at any time; the
   mean profile over every grid point in the box.
 * **Cross section**: click the two ends. Relative humidity, wind speed, temperature, θe or θ
@@ -103,7 +122,7 @@ The panels follow the map: stepping the forecast hour, or changing model or ense
 reloads them. They're available for every model with temperature, height, wind and humidity
 on pressure levels (all but ICON and the REFS mean); HRRR/RRFS/RAP use 24 levels, GFS 21, the ECMWF
 and AI models 12, GEFS/GEPS 8. The cross-section and gridded
-DCAPE calculations live in `public/js/thermo.js`; the sounding panel's numbers are SharpJS's own.
+DCAPE calculations, and every number in the sounding panel, live in `public/js/thermo.js`.
 
 Each level is read only as a window around the area of interest (snapped to 5° tiles and
 cached), so a second sounding nearby, a box there, or a cross section through it is
@@ -225,9 +244,17 @@ Level II, so 3D is NEXRAD only. The code is in `radar/volume.js` and `radar/alph
 velocity, correlation coefficient, differential reflectivity, specific differential phase
 and storm relative velocity. ←/→ step through the loop, space plays, ↑/↓ change tilt and 3
 toggles the 3D view.
-Right-click the map for a menu offering to switch to the nearest working NEXRAD, or to open
+Right-click the map for a menu offering to switch to the nearest working NEXRAD, to open
 an HRRR sounding at that spot from the latest HRRR analysis (F000), in the same sounding
-panel the models use.
+panel the models use, or to start a cross section there.
+
+**Cross sections** (NEXRAD): the line tool (or **X**) in radar mode draws a vertical slice
+through every tilt of the Level II volume that goes with the frame on screen, for
+reflectivity, velocity, spectrum width, ZDR or CC (other products show reflectivity), up to
+20 km, interpolated between tilts, with each tilt's beam centre, range-folded gates in
+purple and a readout under the pointer. It follows the loop and the product, and the ends
+can be swapped. Sampling runs in the radar worker that already holds the decoded volume
+(`radar/worker.js`, `radar/xsect.js`).
 
 **Color tables**: any product (except precipitation type) can use an uploaded table.
 GR2Analyst / RadarScope `.pal` files work (`Color`, `Color4`, `SolidColor`, `SolidColor4`,
@@ -275,7 +302,7 @@ public buckets ──HTTP range request──▶ Web Worker pool                
   AWS mirror answers bursts with "503 Slow Down" and no CORS headers, which browsers report
   as a failed fetch, so it isn't used.
 * **Soundings and cross sections**: `profile.js` gathers windows of each level,
-  `thermo.js` builds the profile, `sounding.js` hands it to SharpJS, `xsect.js` draws the cross
+  `thermo.js` builds the profile and its indices, `sounding.js` draws it, `xsect.js` draws the cross
   section, and `tools.js` handles picking on the globe.
 * **Model catalogue** is `public/js/models.js`: where each model's files are, which
   variables map to which products, and recipes for derived fields. `public/js/sources.js`
@@ -285,6 +312,18 @@ public buckets ──HTTP range request──▶ Web Worker pool                
   ticks fill in as frames arrive. Decoded fields are stored as 16-bit values in an
   in-memory LRU of 1–2.5 GB depending on the device: enough for a full run of most
   products. If a run doesn't fit, loading stops at the limit and the status says so.
+* **Only the view on screen stays in memory.** Memory holds the whole run of the one
+  product being viewed (for the selected model, run and member, with whatever its fields
+  are computed from) and nothing else. Changing product, level, model, run or member drops
+  every other field, accumulated total and cached GRIB byte right away, and cancels queued
+  and in-flight downloads for the old view (aborted in the workers), so the new view gets
+  the connection to itself. Leaving radar mode drops decoded scans and volumes; entering
+  it drops model fields. Windows for soundings and cross sections of the same run are
+  kept. Locally averaged ensemble means are still kept on disk (IndexedDB).
+* **ICON reads.** Each Open-Meteo file is opened by one decode worker (every variable of
+  that hour goes to it), its header and chunk indexes go through a small block cache, and
+  a variable's data is fetched in one or two big range requests rather than ~35 64 KB
+  blocks: about twice as fast per field.
 
 Controls: drag to rotate, scroll to zoom (down to town level), double-click to fly to a
 point, ←/→ to step through forecast hours, space to play, ↑/↓ to change level, S/B/X for a

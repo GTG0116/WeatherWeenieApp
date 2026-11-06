@@ -17,6 +17,13 @@ const MEAN_BATCH = 5; // ensemble members fetched and summed per worker job
 export const PRIORITY = { background: 0, interactive: 1 };
 
 const boxKey = (b) => `${b.south},${b.north},${b.west},${b.east}`;
+/** Error message of work dropped because the view changed (see DataSource.retain). */
+export const CANCELLED = 'cancelled: no longer on screen';
+const hashOf = (s) => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+};
 
 /** Split a run key into [run id, member or null]. */
 export const splitRun = (run) => {
@@ -71,6 +78,8 @@ export class DataSource {
     this.rawBytes = 0;
     this.means = new MeanStore();
     this.stats = { bytes: 0, decodeMs: 0, fields: 0 };
+    this.viewSig = null; // what retain() last kept (see there)
+    this.rawPrefix = null;
     this.workers.forEach((w, i) => {
       w.onmessage = ({ data }) => {
         const p = this.pending.get(data.id);
@@ -78,7 +87,8 @@ export class DataSource {
         this.busy[i] -= p?.weight ?? 1;
         this.#pump();
         if (!p) return;
-        if (data.error) p.reject(new Error(data.error));
+        if (p.cancelled) p.reject(new Error(CANCELLED));
+        else if (data.error) p.reject(new Error(data.error));
         else {
           this.stats.bytes += data.bytes;
           this.stats.decodeMs += data.decodeMs;
@@ -132,11 +142,74 @@ export class DataSource {
       q.fg = best > 0;
       // A batch of ensemble members is several downloads (none if its bytes are here).
       q.weight = q.job.parts ? Math.max(1, q.job.parts.filter((x) => !x.bytes).length) : 1;
-      const i = this.busy.indexOf(Math.min(...this.busy));
+      // Every variable of an Open-Meteo file goes to the worker that already has
+      // that file open (its header, variable list and index blocks are cached there).
+      const i = q.job.kind === 'om' ? hashOf(q.job.url) % this.workers.length : this.busy.indexOf(Math.min(...this.busy));
       this.busy[i] += q.weight;
       const id = this.nextId++;
+      q.worker = i;
       this.pending.set(id, q);
       this.workers[i].postMessage({ id, job: q.job });
+    }
+  }
+
+  // ------------------------------------------------------------- the view on screen
+  /** Every param/level a set of input specs reads, with recipes expanded into what they're made from. */
+  #closure(model, member, specs, out = new Set()) {
+    const m = modelFor(model, member);
+    for (const { param, level } of specs) {
+      const k = `${param}/${level ?? 'sfc'}`;
+      if (out.has(k)) continue;
+      out.add(k);
+      const recipe = m.derived[param];
+      if (recipe?.sum) out.add(`${recipe.sum}/sfc`);
+      else if (recipe) {
+        // Some recipes read other fields depending on the hour (precip buckets): ask at a few.
+        for (const step of [1, 7, 25]) this.#closure(model, member, Object.values(recipe.needs(level, { step, prevStep: step - 1, level })), out);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Keep only what the view on screen reads: one model's run (one member) and
+   * the fields of one product, with what they're computed from, at every hour.
+   * Everything else is dropped from memory, and background work for it, queued
+   * or downloading, is cancelled so the view's own frames get the connection.
+   * Windows for soundings and cross sections of the same run are kept.
+   * @param {{model: string, run: string, specs: {param: string, level?: number}[]}|null} view
+   */
+  retain(view) {
+    const sig = view ? `${view.model}/${view.run}|${view.specs.map((s) => `${s.param}/${s.level ?? 'sfc'}`).sort().join(',')}` : '';
+    if (sig === this.viewSig) return;
+    this.viewSig = sig;
+    const prefix = view ? `${view.model}/${view.run}/` : null;
+    const keep = view ? this.#closure(view.model, splitRun(view.run)[1], view.specs) : new Set();
+    // Keys are "model/run/step/param/level".
+    const kept = (key) => !!prefix && key.startsWith(prefix) && keep.has(key.slice(key.indexOf('/', prefix.length) + 1));
+    for (const [key, e] of this.cache) {
+      if (kept(key)) continue;
+      this.cache.delete(key);
+      if (this.resolved.delete(key)) this.bytes -= e.bytes;
+    }
+    for (const k of this.windows.keys()) if (!prefix || !k.startsWith(prefix)) this.windows.delete(k);
+    if (prefix !== this.rawPrefix) {
+      this.raw.clear();
+      this.rawBytes = 0;
+      this.rawPrefix = prefix;
+    }
+    // Soundings of this run keep loading; anything for another view stops.
+    const stale = (job) =>
+      !!job.key && (job.priority === PRIORITY.interactive ? !prefix || !job.key.startsWith(prefix) : !kept(job.key));
+    this.queue = this.queue.filter((q) => {
+      if (!stale(q.job)) return true;
+      q.reject(new Error(CANCELLED));
+      return false;
+    });
+    for (const [id, p] of this.pending) {
+      if (p.cancelled || !stale(p.job)) continue;
+      p.cancelled = true;
+      this.workers[p.worker].postMessage({ cancel: id });
     }
   }
 
@@ -183,7 +256,7 @@ export class DataSource {
     let count = 0;
     await Promise.all(
       batches.map(async (parts) => {
-        const [f] = await this.#decode({ kind: 'sum', reduce: job.reduce, parts, priority: job.priority }, step);
+        const [f] = await this.#decode({ kind: 'sum', reduce: job.reduce, parts, priority: job.priority, key: job.key }, step);
         if (!acc) {
           acc = f.values;
           meta = f.meta;
@@ -281,6 +354,7 @@ export class DataSource {
     const src = modelFor(model, member).source;
     const job = await src.job(runId, step, param, level, member);
     job.priority = priority;
+    job.key = `${model}/${run}/${step}/${param}/${level ?? 'sfc'}`; // what retain() checks
     if (box) {
       job.extract = box;
       job.parts?.forEach((p) => (p.extract = box));
@@ -293,13 +367,13 @@ export class DataSource {
     if (job.kind === 'mean') fields = await this.#reduce(job, step);
     else if (job.member === 'mean') {
       // One file holds every member (GEPS): split it and decode the members in parallel.
-      const parts = await this.#decode({ kind: 'split', url: job.url, range: job.range, priority: job.priority }, step);
-      fields = await this.#reduce({ reduce: 'mean', priority: job.priority, parts: parts.map((bytes) => ({ bytes, extract: job.extract })) }, step);
+      const parts = await this.#decode({ kind: 'split', url: job.url, range: job.range, priority: job.priority, key: job.key }, step);
+      fields = await this.#reduce({ reduce: 'mean', priority: job.priority, key: job.key, parts: parts.map((bytes) => ({ bytes, extract: job.extract })) }, step);
     } else fields = await this.#decode(job, step);
     fields.forEach((f, i) => {
       const p = i === 0 ? param : job.pair.param;
       src.post(p)?.(f.values, f.meta);
-      normalizeUnits(f);
+      normalizeUnits(f, p);
     });
     if (job.pair && fields[1]) {
       const pairKey = `${model}/${run}/${step}/${job.pair.param}/${level ?? 'sfc'}`;
@@ -396,7 +470,7 @@ export class DataSource {
         if (!recipe.worker) return { values: recipe.make(inp, ctx), meta: base.meta, derived: true };
         // Per-point profile calculations run in a worker; their many inputs aren't kept.
         const inputs = Object.fromEntries(Object.entries(inp).map(([n, f]) => [n, f.values]));
-        const [out] = await this.#decode({ kind: 'compute', fn: recipe.worker, levels: recipe.levels, inputs, meta: base.meta }, step);
+        const [out] = await this.#decode({ kind: 'compute', fn: recipe.worker, levels: recipe.levels, inputs, meta: base.meta, key }, step);
         this.#forget(model, run, step, spec);
         return { values: out.values, meta: base.meta, derived: true };
       });
@@ -428,7 +502,8 @@ export class DataSource {
    * forward from the newest cached total, fetching a few intervals ahead.
    */
   async #runningSum(model, run, step, param, { sum, scale }) {
-    const steps = (this.runSteps.get(`${model}/${splitRun(run)[0]}`) ?? [step]).filter((s) => s <= step);
+    // F000 holds no interval (ICON's analysis file has no precipitation at all): totals start there at zero.
+    const steps = (this.runSteps.get(`${model}/${splitRun(run)[0]}`) ?? [step]).filter((s) => s > 0 && s <= step);
     if (steps[steps.length - 1] !== step) steps.push(step);
     const keyOf = (s) => `${model}/${run}/${s}/${param}/sfc`;
     let i = steps.length - 2;
@@ -538,11 +613,14 @@ class MeanStore {
 // WMO-standard accumulations in kg m⁻² (mm), as AIFS publishes total
 // precipitation (0/1/52) and snowfall water equivalent (0/1/53). IFS uses
 // ECMWF's local codes in metres, which the products expect, so convert.
+// The same codes are also the *rates* (kg m⁻² s⁻¹) of IFS/ENS `tprate`, which
+// stay as they are: only the accumulated params are converted.
 const KG_M2_ACCUMULATIONS = new Set(['0/1/52', '0/1/53']);
+const ACCUMULATED = new Set(['tp', 'sf']);
 
-function normalizeUnits(field) {
+function normalizeUnits(field, param) {
   const { discipline, category, number } = field.meta;
-  if (KG_M2_ACCUMULATIONS.has(`${discipline}/${category}/${number}`)) {
+  if (ACCUMULATED.has(param) && KG_M2_ACCUMULATIONS.has(`${discipline}/${category}/${number}`)) {
     const v = field.values;
     for (let i = 0; i < v.length; i++) v[i] /= 1000;
   }
