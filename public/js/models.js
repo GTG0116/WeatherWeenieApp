@@ -4,9 +4,8 @@
 // Canonical params: 2t 2d 10u 10v 10fg sbcape mlcape mucape sbcin mlcin mucin
 // srh1 srh3 ush6 vsh6 ltng dcape msl sp tp sf tprate ptype refc tcc lcc mcc hcc vis
 // (surface) and t gh u v vo r (pressure levels). Accumulations
-// (tp, sf) are metres of water since F000; visibility is metres. Ensemble
-// probabilities are params too ("prob:…", see probability.js).
-import { ecmwfSource, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
+// (tp, sf) are metres of water since F000.
+import { ecmwfSource, fetchRetry, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
 import {
   classifyPrecipType, dewpointFromRh, ptypeFromCategorical, ptypeFromWmo, relativeVorticity, vorticity,
 } from './derived.js';
@@ -88,17 +87,14 @@ const tpFromBuckets = (hours) => ({
     return out;
   },
 });
-// Snow water since F000 (m) from precipitation buckets and the categorical snow flag
-// averaged over the same interval (GEFS: the share of the bucket that fell as snow).
-const sfFromBuckets = (hours) => ({
+// 1-hour mean rate (kg m⁻² s⁻¹) from hourly files whose precipitation bucket
+// restarts every `hours` (WOOF-NAM 12 h): this hour's bucket less the last hour's.
+const tprateFromBuckets = (hours) => ({
   zeroAtStart: true,
-  needs: (level, ctx) => {
-    const start = ctx.step > 0 ? Math.floor((ctx.step - 1) / hours) * hours : 0;
-    return { b: { param: 'apcp' }, s: { param: 'csnow' }, ...(start > 0 ? { prev: { param: 'sfb', stepOffset: start - ctx.step } } : {}) };
-  },
-  make: ({ b, s, prev }) => {
+  needs: (level, ctx) => ({ b: { param: 'apcp' }, ...(ctx.step % hours !== 1 ? { prev: { param: 'apcp', stepOffset: -1 } } : {}) }),
+  make: ({ b, prev }) => {
     const out = new Float32Array(b.values.length);
-    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) * Math.min(1, Math.max(0, s.values[i])) + (prev ? prev.values[i] : 0);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i] - (prev ? prev.values[i] : 0)) * (1000 / 3600);
     return out;
   },
 });
@@ -348,6 +344,29 @@ const RRFS_HOURLY = ncepSource({
   gridRelativeWinds: true,
   regrid: { res: 0.03 },
 });
+
+// ---------------------------------------------------------------- WOOF-NAM
+// Recast's revival of the NAM 12 km (NCEP grid 218), in NOAA's awphys layout. There is
+// no bucket listing: status.json names the newest runs and the last forecast hour
+// ready in each (hours arrive in order). Runs before 06 UTC 5 Nov 2026 used an
+// earlier layout (no MSLET, gusts or cloud cover; precipitation since F000) and are skipped.
+const WOOF_NAM = 'https://woof-nam.recastsystems.com';
+const WOOF_NAM_LAYOUT = Date.UTC(2026, 10, 5, 6);
+let woofStatus = null;
+async function woofNamSteps(run) {
+  if (run.time < WOOF_NAM_LAYOUT) return [];
+  if (!woofStatus || Date.now() - woofStatus.at > 60e3) {
+    const p = fetchRetry(`${WOOF_NAM}/status.json`).then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status} for WOOF-NAM status.json`);
+      return res.json();
+    });
+    woofStatus = { at: Date.now(), p };
+    p.catch(() => (woofStatus = null));
+  }
+  const c = (await woofStatus.p).cycles?.find((x) => Date.parse(x.cycle) === run.time);
+  const last = Number(c?.hours_available);
+  return c && c.state !== 'skipped' && Number.isFinite(last) ? range(0, Math.min(last, 84), 1) : [];
+}
 
 /** A source that also lists another source's runs, tagged with the model view that reads them. */
 function withRuns(source, extra, view) {
@@ -746,34 +765,45 @@ export const MODELS = {
     derived: { vo: vortFromAbsv, ptype: ptypeCategorical, dcape: dcapeFrom(DCAPE_FINE) },
     profile: PROFILE_HIRES,
   },
-  nbm: {
-    name: 'NBM',
-    label: 'NBM',
-    sub: 'CONUS 2.5 km',
+  woofnam: {
+    name: 'WOOF-NAM',
+    label: 'WOOF-NAM',
+    sub: 'N. America 12 km',
     group: 'regional',
     regional: true,
-    credit: 'NOAA National Blend of Models via AWS Open Data',
+    credit: 'WOOF-NAM by Recast (CC BY 4.0) · not an official NOAA/NWS forecast',
     source: ncepSource({
-      bucket: 'https://noaa-nbm-grib2-pds.s3.amazonaws.com',
-      files: { sfc: (r, s) => `blend.${r.date}/${r.hh}/core/blend.t${r.hh}z.core.f${p3(s)}.co.grib2` },
-      listing: { sfc: { prefix: (r) => `blend.${r.date}/${r.hh}/core/blend.t${r.hh}z.core.f`, re: /\.f(\d{3})\.co\.grib2\.idx$/ } },
-      cycle: 1,
-      search: 8,
-      maxRuns: 6,
-      steps: nbmSteps,
-      levels: [],
-      params: ['2t', '2d', 'rh2', 'vis', ...Object.keys(NBM_PARAMS)],
-      overrides: NBM_PARAMS,
-      extra: '',
-      regrid: { res: 0.03 },
+      bucket: WOOF_NAM,
+      files: { sfc: (r, s) => `woof-nam/12km/${r.date}/${r.hh}z/woof-nam.t${r.hh}z.awphys${p2(s)}.tm00.grib2` },
+      stepsOf: woofNamSteps,
+      cycle: 6,
+      search: 36,
+      maxRuns: 4,
+      steps: () => range(0, 84, 1),
+      // Every 25 hPa from 1000 to 50 hPa, all in the one file
+      levels: UPPER.slice(0, -1),
+      profileLevels: PROFILE_HIRES,
+      // No categorical precip type, lightning, low/mid/high cloud, 90 hPa mixed-layer
+      // parcel or 0–1 km helicity; absolute vorticity only on a few levels.
+      params: ['2t', '2d', '10u', '10v', '10fg', 'sbcape', 'mucape', 'sbcin', 'mucin', 'srh3', 'ush6', 'vsh6', 'msl', 'sp', 'apcp', 'refc', 'tcc', 't', 'gh', 'u', 'v', 'r'],
+      overrides: {
+        msl: { v: 'MSLET' },
+        mucape: { l: '180-0 mb above ground' },
+        mucin: { l: '180-0 mb above ground' },
+      },
+      gridRelativeWinds: true,
+      regrid: { res: 0.1 },
     }),
     derived: {
-      tp: nbmTotal('tp', 'apcp1', 'apcp6'),
-      sf: nbmTotal('sf', 'asnow1', 'asnow6', 0.1), // snow depth → water at 10:1, so the 10:1 map shows NBM's own snowfall
-      ptype: nbmPtypeRecipe,
+      vo: vortFromWinds,
+      // APCP restarts every 12 h (0-1 … 0-12, 12-13 … 12-24, …), as in NOAA's NAM.
+      tp: tpFromBuckets(12),
+      tprate: tprateFromBuckets(12),
+      ptype: ptypeProfile,
+      dcape: dcapeFrom(DCAPE_FINE),
     },
-    totalAt: nbmTotalAt,
-    notes: { tprate: '1 h mean', ptype: 'most likely type', sf: "NBM's own snow ratios" },
+    notes: { ptype: 'type from temperature profile', tprate: '1 h mean' },
+    profile: PROFILE_HIRES,
   },
 };
 

@@ -20,6 +20,7 @@ static host. (The one exception is Canada's GEPS and GDPS, which need a tiny pro
 | RRFS | CONUS 3 km | hourly runs: full output every 3 h (to 84 h at 00/06/12/18 UTC, 18 h at 03/09/15/21 UTC), surface fields only to 18 h in between | NOAA `noaa-rrfs-ops-pds` |
 | RAP | North America 13 km | hourly to 21 h (51 h at 03/09/15/21 UTC) | NOAA `noaa-rap-pds` |
 | NBM (National Blend of Models) | CONUS 2.5 km | hourly runs, each hourly to 48 h, then every 3-hourly valid time to 192 h and every 6-hourly one to 264 h | NOAA `noaa-nbm-grib2-pds` |
+| WOOF-NAM (Recast's revived NAM) | North America 12 km (NCEP grid 218) | hourly to 84 h, 00/06/12/18 UTC | [woof-nam.recastsystems.com](https://woof-nam.recastsystems.com/index.html) (CC BY 4.0) |
 
 ### Ensembles
 
@@ -195,16 +196,14 @@ after 120 h, AIGFS is 6-hourly), the app says so instead of drawing something mi
 GEFS (6-hour buckets) and REFS (1-hour buckets) publish precipitation that restarts every
 bucket; their run totals are built by adding the buckets up.
 
-**Locally derived fields**, only where a model doesn't publish one (a published field always
-wins over a recipe of the same name):
-* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles, GDPS away from the 200/250/500/700/850
-  hPa levels it publishes); from absolute vorticity for the NCEP deterministic models
-* precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS),
+**Locally derived fields**, where a model doesn't publish one:
+* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles); from absolute vorticity for the
+  NCEP deterministic models
+* precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS, WOOF-NAM),
   NCEP's categorical rain/snow/sleet/freezing-rain flags (GFS, HRRR, RRFS, RAP, GEFS, REFS),
   or the weather code (ICON)
-* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEPS), or the
-  mean over the latest 3–6 h bucket (GEFS). REFS and NBM rates are their published 1-hour
-  amounts, read as rates.
+* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEFS,
+  GEPS), or from the 1-hour bucket (REFS), or as a 1-hour mean from the 12-hour buckets (WOOF-NAM)
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
 * snowfall for models without a snowfall field: precipitation × snow share from precip type
