@@ -10,7 +10,11 @@
     <title>Model Globe</title>
     <meta name="description" content="Global and North American weather models and ensembles (ECMWF IFS, AIFS & ENS, GFS, GEFS, AIGFS, ICON, GEPS, HRRR, RRFS, REFS, RAP) and NEXRAD / TDWR radar on a WebGL globe, decoded in your browser." />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Montserrat:wght@800;900&display=swap" />
     <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="css/features.css" />
     <script type="importmap">
       {
         "imports": {
@@ -171,8 +175,15 @@
         </div>
       </section>
 
+      <section class="block">
+        <button class="settings-open wide-btn" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.6 2.5h2.8l.4 2.1 1.5.9 2-.8 1.4 2.4-1.6 1.4v1.7l1.6 1.4-1.4 2.4-2-.8-1.5.9-.4 2.1H8.6l-.4-2.1-1.5-.9-2 .8-1.4-2.4 1.6-1.4V9.1L3.3 7.7l1.4-2.4 2 .8 1.5-.9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+          Settings <span class="hint">map style, size, alerts, broadcast</span>
+        </button>
+      </section>
+
       <footer class="foot">
-        Data: <span id="credit">—</span>, decoded in your browser. Climatology: NCEP/NCAR R1 1991–2020. Map: Natural Earth, US Census, GeoNames.
+        Data: <span id="credit">—</span>, decoded in your browser. Climatology: NCEP/NCAR R1 1991–2020. Map: Natural Earth, US Census, GeoNames. Alerts: NWS.
       </footer>
     </aside>
 
@@ -196,6 +207,18 @@
       </button>
       <button class="icon-btn" id="zoom-out" title="Zoom out" aria-label="Zoom out">
         <svg viewBox="0 0 20 20"><path d="M4.5 10h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn settings-open" title="Settings: map style, size, alerts, broadcast" aria-label="Settings">
+        <svg viewBox="0 0 20 20"><path d="M10 6.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.6 2.5h2.8l.4 2.1 1.5.9 2-.8 1.4 2.4-1.6 1.4v1.7l1.6 1.4-1.4 2.4-2-.8-1.5.9-.4 2.1H8.6l-.4-2.1-1.5-.9-2 .8-1.4-2.4 1.6-1.4V9.1L3.3 7.7l1.4-2.4 2 .8 1.5-.9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="icon-btn" id="save-image" title="Save image (at the size picked in Settings › Size)" aria-label="Save image">
+        <svg viewBox="0 0 20 20"><path d="M3 6.5h3l1.4-2h5.2l1.4 2h3v9.5H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="10" cy="11" r="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+      <button class="icon-btn" id="record-video" title="Record a video (MP4 or GIF) of the loop" aria-label="Record video">
+        <svg viewBox="0 0 20 20"><rect x="2.5" y="5" width="10.5" height="10" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m13 9 4.5-2.5v7L13 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="icon-btn" id="broadcast-toggle" title="Broadcast mode" aria-label="Broadcast mode">
+        <svg viewBox="0 0 20 20"><rect x="2.5" y="4.5" width="15" height="10" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 17.5h6M5 7.5h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
       <button class="icon-btn" id="home" title="Reset view" aria-label="Reset view">
         <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 10h12M10 4c-2.6 3.4-2.6 8.6 0 12M10 4c2.6 3.4 2.6 8.6 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
@@ -232,6 +255,28 @@
         <svg viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
     </div>
+
+    <aside id="settings" hidden aria-label="Settings">
+      <header class="settings-head">
+        <span>Settings</span>
+        <button class="icon-btn" id="settings-close" title="Close (Esc)" aria-label="Close settings">
+          <svg viewBox="0 0 20 20"><path d="m5.5 5.5 9 9m0-9-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <nav class="settings-tabs" role="tablist">
+        <button data-tab="map" role="tab">Map</button>
+        <button data-tab="frame" role="tab">Size</button>
+        <button data-tab="alerts" role="tab">Alerts</button>
+        <button data-tab="broadcast" role="tab">Broadcast</button>
+      </nav>
+      <div class="settings-body">
+        <div class="settings-pane toggles" data-pane="map" id="map-settings"></div>
+        <div class="settings-pane toggles" data-pane="frame" id="frame-settings"></div>
+        <div class="settings-pane toggles" data-pane="alerts" id="alerts-panel"></div>
+        <div class="settings-pane toggles" data-pane="broadcast" id="broadcast-panel"></div>
+      </div>
+    </aside>
+    <div id="frame-label" hidden></div>
 
     <div id="status"><span class="spinner"></span><span id="status-text">Starting…</span></div>
     <div id="tooltip"></div>

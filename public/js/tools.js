@@ -26,7 +26,7 @@ export class MapTools {
     stage.appendChild(this.svg);
     globe.on('frame', (moved) => moved && this.#draw());
 
-    const canvas = globe.renderer.domElement;
+    const canvas = globe.eventEl; // the globe's canvas or the MapLibre map, whichever is shown
     let down = null;
     let right = null; // right button held: {x, y, ll, dragging}
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -90,7 +90,7 @@ export class MapTools {
     this.mode = mode;
     this.anchor = null;
     this.hover = null;
-    this.globe.renderer.domElement.classList.toggle('picking', !!mode);
+    this.globe.eventEl.classList.toggle('picking', !!mode);
     this.h.onModeChange?.(mode);
     this.#draw();
   }
