@@ -1,9 +1,10 @@
 // Save the map as an image, or record a loop of frames as an MP4 (WebCodecs
 // H.264, muxed with mp4-muxer) or GIF (gifenc). Exports use the map size
-// picked in Settings > Size (or the window at screen resolution), and look like
-// the screen: the map is drawn again at a higher pixel ratio, then the town and
-// value labels, the broadcast graphic and (without broadcast mode) the title
-// and legend are painted on top from their on-screen layout.
+// picked in Settings > Size (or the window at screen resolution) times the
+// export detail picked there, and look like the screen: the map is drawn again
+// at a higher pixel ratio, then the town and value labels, the broadcast
+// graphic and (without broadcast mode) the title and legend are painted on top
+// from their on-screen layout.
 
 const MP4_MUXER = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/+esm';
 const GIFENC = 'https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm';
@@ -30,15 +31,21 @@ const stamp = () => {
 };
 
 // ------------------------------------------------------------------ DOM -> canvas
-/** First shadow of a CSS box-shadow / text-shadow list: {color, x, y, blur} or null. */
-function parseShadow(v) {
-  if (!v || v === 'none') return null;
-  const first = v.split(/,(?![^(]*\))/)[0].trim();
-  if (/inset/.test(first)) return null;
-  const color = first.match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}/i)?.[0] ?? 'rgba(0,0,0,0.5)';
-  const nums = first.replace(color, '').match(/-?[\d.]+px/g)?.map(parseFloat) ?? [];
-  return { color, x: nums[0] ?? 0, y: nums[1] ?? 0, blur: nums[2] ?? 0 };
+/** Every outer shadow of a CSS box-shadow / text-shadow list: [{color, x, y, blur, spread}]. */
+function parseShadows(v) {
+  if (!v || v === 'none') return [];
+  const out = [];
+  for (const part of v.split(/,(?![^(]*\))/)) {
+    const one = part.trim();
+    if (!one || /inset/.test(one)) continue;
+    const color = one.match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}/i)?.[0] ?? 'rgba(0,0,0,0.5)';
+    const nums = one.replace(color, '').match(/-?[\d.]+px/g)?.map(parseFloat) ?? [];
+    out.push({ color, x: nums[0] ?? 0, y: nums[1] ?? 0, blur: nums[2] ?? 0, spread: nums[3] ?? 0 });
+  }
+  return out;
 }
+
+const parseShadow = (v) => parseShadows(v)[0] ?? null;
 
 const transparent = (c) => !c || c === 'transparent' || /rgba\([^)]*,\s*0\)$/.test(c);
 
@@ -53,6 +60,27 @@ class Painter {
   box(r) {
     const { origin: o, k } = this;
     return { x: (r.left - o.left) * k, y: (r.top - o.top) * k, w: r.width * k, h: r.height * k };
+  }
+
+  /**
+   * Paint shadows only, CSS style (the first listed on top): each shape is
+   * drawn far off the canvas with its shadow offset back into place, so only
+   * the shadow lands. draw(dx, spread) draws the shape moved dx to the side.
+   */
+  shadowsOnly(list, scale, draw) {
+    if (!list.length) return;
+    const ctx = this.ctx;
+    const k = scale * this.k;
+    const off = (ctx.canvas.width + ctx.canvas.height) * 2 + 1000;
+    ctx.save();
+    for (const sh of [...list].reverse()) {
+      ctx.shadowColor = sh.color;
+      ctx.shadowOffsetX = sh.x * k + off;
+      ctx.shadowOffsetY = sh.y * k;
+      ctx.shadowBlur = sh.blur * k;
+      draw(-off, sh.spread * k);
+    }
+    ctx.restore();
   }
 
   shadow(s, scale) {
@@ -87,14 +115,27 @@ class Painter {
       ctx.roundRect(b.x, b.y, b.w, b.h, radius);
       ctx.fill();
     };
-    if (!transparent(cs.backgroundColor) || grad) this.shadow(parseShadow(cs.boxShadow), scale);
+    if (!transparent(cs.backgroundColor) || grad) {
+      // Box shadows (rings and drop shadows), kept outside the box as CSS does.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.roundRect(b.x, b.y, b.w, b.h, radius);
+      ctx.clip('evenodd');
+      ctx.fillStyle = '#000';
+      this.shadowsOnly(parseShadows(cs.boxShadow), scale, (dx, sp) => {
+        ctx.beginPath();
+        ctx.roundRect(b.x + dx - sp, b.y - sp, b.w + sp * 2, b.h + sp * 2, radius + sp);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
     if (!transparent(cs.backgroundColor)) fillBox(cs.backgroundColor);
     if (grad) {
       const colors = grad.match(/rgba?\([^)]+\)|#[0-9a-f]{3,8}/gi) ?? [];
       if (colors.length > 1) {
         const g = ctx.createLinearGradient(b.x, 0, b.x + b.w, 0);
         colors.forEach((c, i) => g.addColorStop(i / (colors.length - 1), c));
-        this.shadow(null);
         fillBox(g);
       }
     }
@@ -298,7 +339,7 @@ class Painter {
     if ('letterSpacing' in ctx) ctx.letterSpacing = `${(parseFloat(cs.letterSpacing) || 0) * scale * this.k}px`;
     ctx.fillStyle = cs.color;
     ctx.textBaseline = 'alphabetic';
-    this.shadow(parseShadow(cs.textShadow), scale);
+    const shadows = parseShadows(cs.textShadow);
     for (const [t, r] of pieces) {
       if (!t || !r.width) continue;
       const s = upper ? t.toUpperCase() : t;
@@ -306,7 +347,10 @@ class Painter {
       const m = ctx.measureText(s);
       const asc = m.fontBoundingBoxAscent ?? size * 0.8;
       const desc = m.fontBoundingBoxDescent ?? size * 0.2;
-      ctx.fillText(s, b.x, b.y + (b.h - (asc + desc)) / 2 + asc);
+      const y = b.y + (b.h - (asc + desc)) / 2 + asc;
+      // Every text shadow, stacked as on screen (the town names' dark outline is three).
+      this.shadowsOnly(shadows, scale, (dx) => ctx.fillText(s, b.x + dx, y));
+      ctx.fillText(s, b.x, y);
     }
     ctx.restore();
   }
@@ -334,12 +378,20 @@ export class Exporter {
     this.#buildDialog();
   }
 
-  /** Output size: the picked map size, or the map at screen resolution. */
-  size(scale = 1) {
+  /**
+   * Output size: the picked map size (or the map at screen resolution) times
+   * the export detail and `scale`. Videos stay within what the format holds:
+   * MP4 within H.264's 4K limit; GIF within ~2 MP, or the 1x size if that's bigger.
+   */
+  size(scale = 1, format = null) {
     const stage = document.getElementById('stage').getBoundingClientRect();
     const fs = this.frameSize();
-    let k = fs ? fs.w / stage.width : Math.min(window.devicePixelRatio || 1, 2);
-    k *= scale;
+    const base = (fs ? fs.w / stage.width : Math.min(window.devicePixelRatio || 1, 2)) * scale;
+    let k = base * (this.detail?.() ?? 1);
+    const fit = (side, px) => Math.min(side / stage.width, side / stage.height, Math.sqrt(px / (stage.width * stage.height)));
+    if (format === 'mp4') k = Math.min(k, fit(4096, 8.9e6));
+    else if (format === 'gif') k = Math.min(k, Math.max(base, fit(2048, 2.1e6)));
+    else k = Math.min(k, fit(16384, 100e6)); // browser canvas limits
     const even = (v) => Math.max(2, Math.round(v / 2) * 2); // H.264 wants even sizes
     return { w: even(stage.width * k), h: even(stage.height * k), k, stage };
   }
@@ -455,7 +507,7 @@ export class Exporter {
     const frames = this.frames();
     const o = this.opts;
     if (o.format === 'mp4' && !this.#mp4Supported()) o.format = 'gif';
-    const { w, h } = this.size(o.scale);
+    const { w, h } = this.size(o.scale, o.format);
     const n = this.selected.size;
     const seconds = n ? (n * o.frameMs + o.pauseMs) / 1000 : 0;
     const fs = this.frameSize();
@@ -463,7 +515,7 @@ export class Exporter {
       <div class="ex-head"><span>Record video</span><button class="icon-btn ex-close" aria-label="Close"${this.recording ? ' disabled' : ''}>
         <svg viewBox="0 0 20 20"><path d="m5.5 5.5 9 9m0-9-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></div>
       <div class="ex-body">
-        <div class="ex-row"><span>Size</span><b>${w} × ${h}</b><span class="hint">${fs ? 'from Settings › Size' : 'the map at screen resolution · pick a size in Settings › Size'}</span></div>
+        <div class="ex-row"><span>Size</span><b>${w} × ${h}</b><span class="hint">${fs ? `${fs.w} × ${fs.h} from Settings › Size` : 'the map at screen resolution, from Settings › Size'} · ${this.detail?.() ?? 1}× detail</span></div>
         <div class="ex-row"><span>Format</span>
           <div class="segmented ex-format">
             <button data-f="mp4" class="${o.format === 'mp4' ? 'active' : ''}"${this.#mp4Supported() ? '' : ' disabled title="This browser can\'t encode H.264 video (WebCodecs): try Chrome, Edge or Safari"'}>MP4</button>
@@ -620,7 +672,7 @@ export class Exporter {
     const o = this.opts;
     const list = [...this.selected].sort((a, b) => a - b);
     const keep = this.current();
-    const { w, h, k, stage } = this.size(o.scale);
+    const { w, h, k, stage } = this.size(o.scale, o.format);
     this.recording = true;
     this.busy = true;
     this.cancelled = false;
