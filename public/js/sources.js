@@ -111,7 +111,7 @@ async function discoverRuns({ cycle, search, maxRuns, expected, stepsOf, cache }
 const stepsFromKeys = (keys, re) => keys.map((k) => re.exec(k)?.[1]).filter(Boolean).map(Number);
 
 // ---------------------------------------------------------------------------
-// NCEP models (GFS, AIGFS, HRRR, RAP, RRFS): wgrib2-style .idx files
+// NCEP models (GFS, AIGFS, HRRR, RAP, RRFS) and NCEP-style files (WOOF-NAM): wgrib2-style .idx files
 
 const INST = /^(anl|\d+ (hour|day) fcst)$/;
 const ACC0 = /^0-\d+ (hour|day) acc fcst$/;
@@ -189,7 +189,8 @@ const matches = (want, got) => (want instanceof RegExp ? want.test(got) : want =
  * @param {object} cfg
  * @param {string} cfg.bucket
  * @param {Record<string, (r: object, step: number, member: string|null) => string>} cfg.files file key per kind ('sfc', 'prs', ...)
- * @param {Record<string, {prefix: (r: object) => string, re: RegExp}>} cfg.listing
+ * @param {Record<string, {prefix: (r: object) => string, re: RegExp}>} [cfg.listing] S3 listing per file kind, for run discovery
+ * @param {(run: object) => Promise<number[]>} [cfg.stepsOf] steps published for a run, instead of a bucket listing
  * @param {number[]} cfg.levels pressure levels published
  * @param {Record<string, number[]>} [cfg.paramLevels] per-param levels, where they differ from `levels`
  * @param {number[]} [cfg.profileLevels] extra levels read for soundings and cross sections
@@ -272,12 +273,12 @@ export function ncepSource(cfg) {
         maxRuns: cfg.maxRuns,
         expected: cfg.steps,
         cache: runCache,
-        stepsOf: async (run) => {
+        stepsOf: cfg.stepsOf ?? (async (run) => {
           const lists = await Promise.all(
             Object.values(cfg.listing).map(async ({ prefix, re }) => new Set(stepsFromKeys(await listKeys(cfg.bucket, prefix(run)), re))),
           );
           return [...lists[0]].filter((s) => lists.every((l) => l.has(s)));
-        },
+        }),
       }),
   };
 }
