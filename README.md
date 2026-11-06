@@ -18,6 +18,7 @@ static host. (The one exception is GEPS, which needs a tiny proxy; see below.)
 | HRRR | CONUS 3 km | hourly to 18 h (48 h at 00/06/12/18 UTC) | NOAA `noaa-hrrr-bdp-pds` |
 | RRFS | CONUS 3 km | hourly runs: full output every 3 h (to 84 h at 00/06/12/18 UTC, 18 h at 03/09/15/21 UTC), surface fields only to 18 h in between | NOAA `noaa-rrfs-ops-pds` |
 | RAP | North America 13 km | hourly to 21 h (51 h at 03/09/15/21 UTC) | NOAA `noaa-rap-pds` |
+| WOOF-NAM (Recast's revived NAM) | North America 12 km (NCEP grid 218) | hourly to 84 h, 00/06/12/18 UTC | [woof-nam.recastsystems.com](https://woof-nam.recastsystems.com/index.html) (CC BY 4.0) |
 
 ### Ensembles
 
@@ -147,11 +148,11 @@ bucket; their run totals are built by adding the buckets up.
 **Locally derived fields**, where a model doesn't publish one:
 * vorticity from u/v (AIFS, AIGFS, ICON, the ensembles); from absolute vorticity for the
   NCEP deterministic models
-* precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS),
+* precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS, WOOF-NAM),
   NCEP's categorical rain/snow/sleet/freezing-rain flags (GFS, HRRR, RRFS, RAP, GEFS, REFS),
   or the weather code (ICON)
 * precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEFS,
-  GEPS), or from the 1-hour bucket (REFS)
+  GEPS), or from the 1-hour bucket (REFS), or as a 1-hour mean from the 12-hour buckets (WOOF-NAM)
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
 * snowfall for models without a snowfall field: precipitation × snow share from precip type

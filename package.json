@@ -2,7 +2,7 @@
   "name": "model-globe",
   "version": "0.2.0",
   "private": true,
-  "description": "Weather model and ensemble viewer on a custom WebGL globe (ECMWF IFS/AIFS/ENS, GFS, GEFS, AIGFS, ICON, GEPS, HRRR, RRFS, REFS, RAP). GRIB2 is decoded in the browser.",
+  "description": "Weather model and ensemble viewer on a custom WebGL globe (ECMWF IFS/AIFS/ENS, GFS, GEFS, AIGFS, ICON, GEPS, HRRR, RRFS, REFS, RAP, WOOF-NAM). GRIB2 is decoded in the browser.",
   "type": "module",
   "scripts": {
     "start": "node server/server.js",
