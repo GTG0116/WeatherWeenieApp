@@ -4,6 +4,7 @@
 // product and tilt.
 import { NOMINAL_TILTS, RADAR_GROUPS, RADAR_PRODUCTS, hasCustomColormap, hasLegacy, radarProductById, sourceOf, tiltCount } from './products.js';
 import { sampleNearest } from '../data.js';
+import { legacySweep } from './legacy.js';
 import { RadarSource, STALE_MS, ago, fetchStatus, listFrames, loadSites } from './source.js';
 import { colorTableName, resetColorTable, restoreColorTables, saveColorTable } from './colortables.js';
 
@@ -120,8 +121,8 @@ export class RadarView {
   }
 
   #nearestSite() {
-    const c = this.globe.camera.position;
-    return this.nearestNexrad(Math.asin(c.y / c.length()) / D2R, Math.atan2(-c.z, c.x) / D2R)?.site ?? this.siteById.KTLX;
+    const c = this.globe.centerLatLon();
+    return this.nearestNexrad(c.lat, c.lon)?.site ?? this.siteById.KTLX;
   }
 
   /** Closest working NEXRAD to a point (any NEXRAD if none is up): {site, km}. */
@@ -226,16 +227,17 @@ export class RadarView {
         b.addEventListener('click', () => this.available(p) && this.selectProduct(p.id));
         list.appendChild(b);
       }
-      if (group === 'dualpol') {
-        const row = document.createElement('div');
-        row.className = 'res-row';
-        row.innerHTML = `<span>Resolution</span><div class="segmented" id="radar-res">
-          <button data-res="super" title="Level II at 0.5° × 250 m on the low tilts (CC, ZDR; KDP computed from ΦDP)">Super-res</button>
-          <button data-res="legacy" title="Level III at 1° × 250 m">Legacy</button></div>`;
-        row.querySelectorAll('[data-res]').forEach((b) => b.addEventListener('click', () => this.selectRes(b.dataset.res)));
-        section.appendChild(row);
-      }
       el.appendChild(section);
+    }
+    // Resolution, for every NEXRAD product: it sits with the tilts.
+    if (!document.getElementById('radar-res')) {
+      const row = document.createElement('div');
+      row.className = 'res-row';
+      row.innerHTML = `<span>Resolution</span><div class="segmented" id="radar-res">
+        <button data-res="super">Super-res</button>
+        <button data-res="legacy">Legacy</button></div>`;
+      row.querySelectorAll('[data-res]').forEach((b) => b.addEventListener('click', () => this.selectRes(b.dataset.res)));
+      document.getElementById('radar-tilt-block').appendChild(row);
     }
     this.#syncProducts();
   }
@@ -245,20 +247,26 @@ export class RadarView {
     this.state.res = res;
     this.state.tilt = this.tilt;
     this.#syncProducts();
-    if (this.product.group === 'dualpol' && this.site && hasLegacy(this.product, this.site.type)) this.onChange();
+    if (this.site?.type === 'WSR-88D' && hasSuperRes(this.product)) this.onChange();
   }
 
   #syncRes() {
     const p = this.product;
     const site = this.site;
-    const has = !!site && hasLegacy(p, site.type);
-    const legacyOnly = p.group === 'dualpol' && !has;
+    const nexrad = site?.type === 'WSR-88D';
+    const legacyOnly = nexrad && !hasSuperRes(p);
     document.querySelectorAll('#radar-res [data-res]').forEach((b) => {
       b.classList.toggle('active', legacyOnly ? b.dataset.res === 'legacy' : b.dataset.res === this.res);
-      b.disabled = p.group === 'dualpol' && !has;
+      b.disabled = !nexrad || legacyOnly;
     });
     const row = document.querySelector('.res-row');
-    if (row) row.title = legacyOnly ? `${p.name} is only made at legacy resolution` : p.group === 'dualpol' ? '' : 'Applies to CC, ZDR and KDP';
+    if (!row) return;
+    row.hidden = !nexrad;
+    row.title = legacyOnly
+      ? `${p.name} is only made at legacy resolution`
+      : hasLegacy(p, site.type)
+        ? 'Super-res: Level II at 0.5° × 250 m · Legacy: Level III at 1° × 250 m'
+        : `Super-res: 0.5° × 250 m · Legacy: the same scan at 1° × ${p.group === 'reflectivity' ? '1 km' : '250 m'}`;
   }
 
   #syncProducts() {
@@ -463,8 +471,12 @@ export class RadarView {
     this.index = i;
     if (!frame) return null;
     const p = this.product;
-    const sweep = await this.source.get(frame);
+    let sweep = await this.source.get(frame);
     if (seq !== this.showSeq) return null;
+    // Legacy resolution where there's no legacy file of its own: the super-res scan coarsened.
+    if (this.res === 'legacy' && this.site.type === 'WSR-88D' && hasSuperRes(p) && !hasLegacy(p, this.site.type)) {
+      sweep = legacySweep(sweep, { gateKm: p.group === 'reflectivity' ? 1 : 0.25, nearest: !!p.folds || !!p.classes });
+    }
     this.sweep = sweep;
     this.shownProduct = p;
     this.typeGrid = typeGrid;
@@ -518,6 +530,10 @@ export class RadarView {
     return { km, az, value, inRange, type: tg ? (Number.isFinite(type) ? type : tg.outside) : undefined };
   }
 }
+
+/** Products made at super resolution (0.5°) by NEXRAD, so a legacy (1°) view differs. */
+const SUPER_RES = new Set(['ref', 'ptype', 'vel', 'srv', 'sw', 'cc', 'zdr', 'kdp']);
+const hasSuperRes = (p) => SUPER_RES.has(p.id);
 
 export function distanceKm(lat1, lon1, lat2, lon2) {
   const p1 = lat1 * D2R;

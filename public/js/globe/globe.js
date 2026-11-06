@@ -44,6 +44,20 @@ const vertexShader = /* glsl */ `
   }
 `;
 
+// Flat pass (MapLibre engine): a full-screen quad covering a Web Mercator box,
+// drawn offscreen and handed to MapLibre as a canvas source.
+const flatVertexShader = /* glsl */ `
+  varying vec2 vUv;
+  varying vec3 vObj;
+  varying vec3 vNormalV;
+  void main() {
+    vUv = uv;
+    vObj = vec3(1.0, 0.0, 0.0);
+    vNormalV = vec3(0.0, 0.0, 1.0);
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
 const fragmentShader = /* glsl */ `
   uniform sampler2D uLand;    // hi-res land coverage, cell-centred, row 0 = 90N, col 0 = 180W
   uniform sampler2D uRelief;  // [hillshade, elevation] on the model grid
@@ -87,6 +101,23 @@ const fragmentShader = /* glsl */ `
 
   varying vec3 vObj;
   varying vec3 vNormalV;
+#ifdef FLAT
+  varying vec2 vUv;
+  uniform vec4 uFlatBounds; // west, east (deg), south, north (Mercator y, radians)
+  vec3 flatObj() {
+    float lon = radians(mix(uFlatBounds.x, uFlatBounds.y, vUv.x));
+    float lat = atan(sinh(mix(uFlatBounds.z, uFlatBounds.w, vUv.y)));
+    float c = cos(lat);
+    return vec3(c * cos(lon), sin(lat), -c * sin(lon));
+  }
+#endif
+
+  // Straight-alpha "over": with alpha = 1 this is mix(color, src, a).
+  void over(inout vec3 color, inout float alpha, vec3 src, float a) {
+    float outA = a + alpha * (1.0 - a);
+    color = outA > 0.0 ? (src * a + color * alpha * (1.0 - a)) / outA : vec3(0.0);
+    alpha = outA;
+  }
 
   vec2 lonLat(vec3 p) {
     p = normalize(p);
@@ -154,10 +185,19 @@ const fragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec2 ll = lonLat(vObj);
+#ifdef FLAT
+    vec3 obj = flatObj();
+    float diffuse = 0.7;
+    vec3 color = vec3(0.0);
+    float alpha = 0.0;
+    vec2 ll = lonLat(obj);
+#else
+    vec3 obj = vObj;
+    vec2 ll = lonLat(obj);
     vec3 n = normalize(vNormalV);
     float diffuse = clamp(dot(n, normalize(vec3(-0.35, 0.45, 0.82))), 0.0, 1.0);
     float limb = clamp(n.z, 0.0, 1.0);
+    float alpha = 1.0;
 
     // ---- base map
     vec3 ocean = vec3(0.030, 0.058, 0.098);
@@ -179,18 +219,19 @@ const fragmentShader = /* glsl */ `
     float g10 = max(contourMask(ll.x, 10.0, 0.9), contourMask(ll.y, 10.0, 0.9));
     color = mix(color, vec3(0.55, 0.65, 0.8), g10 * 0.07);
     color *= 0.6 + 0.55 * diffuse;
+#endif
 
     // ---- data layer
     float value = MISSING;
     vec2 xy = vec2(-1.0);
     if (uHasData && uRadar) {
-      value = radarValue(vObj);
+      value = radarValue(obj);
     } else if (uHasData) {
       xy = dataXY(ll);
       if (xy.x >= 0.0) value = bilinear(uData, xy);
     }
     if (value > 1e29) {
-      color = mix(color, uRfColor, 0.85 * uOpacity);
+      over(color, alpha, uRfColor, 0.85 * uOpacity);
     } else if (value > -1e29) {
       float t;
       if (uScale == 1) {
@@ -211,22 +252,26 @@ const fragmentShader = /* glsl */ `
       float lutSize = float(${LUT_SIZE});
       vec4 c = texture(uLut, vec2((t * (lutSize - 1.0) + 0.5) / lutSize, (row + 0.5) / uLutRows));
       vec3 lit = c.rgb * (0.86 + 0.2 * diffuse);
-      color = mix(color, lit, c.a * uOpacity);
+      over(color, alpha, lit, c.a * uOpacity);
 
       if (uHasIso) {
-        color = mix(color, uIsoColor, isoMask(value, uIsoValue, 1.6) * 0.95);
+        over(color, alpha, uIsoColor, isoMask(value, uIsoValue, 1.6) * 0.95);
       }
     }
 
     // ---- contours
     if (uHasContour && xy.x >= 0.0) {
       float cv = bilinear(uContour, xy);
-      if (cv > -1e29) color = mix(color, uContourColor, contourMask(cv, uContourInterval, 1.25) * uContourAlpha);
+      if (cv > -1e29) over(color, alpha, uContourColor, contourMask(cv, uContourInterval, 1.25) * uContourAlpha);
     }
 
+#ifdef FLAT
+    gl_FragColor = vec4(color * alpha, alpha); // premultiplied, like the canvas
+#else
     // subtle limb darkening for depth
     color *= mix(0.78, 1.0, smoothstep(0.0, 0.45, limb));
     gl_FragColor = vec4(color, 1.0);
+#endif
   }
 `;
 
@@ -391,7 +436,104 @@ export class Globe {
 
   setCenterOffset(px) {
     this.centerOffset = px;
+    if (this.ext) return this.ext.setCenterOffset(px);
     this.resize();
+  }
+
+  // ------------------------------------------------------------- external map (MapLibre)
+  /**
+   * Hand the view over to another map engine (see map/maplibre.js): it owns
+   * the camera and input, and this class draws the data layer offscreen in Web
+   * Mercator for it (renderFlat). Camera helpers (project, pick, flyTo, ...)
+   * then answer for that map, so the overlays built on them keep working.
+   */
+  attachMap(ext) {
+    this.ext = ext;
+    this.flight = this.tiltFlight = this.tiltAnim = null;
+    this.renderer.domElement.style.display = 'none';
+    this.dirty = true;
+  }
+
+  detachMap() {
+    if (!this.ext) return;
+    this.ext = null;
+    this.renderer.domElement.style.display = '';
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.sized = true;
+    this.resize();
+    this.dirty = true;
+  }
+
+  /** The element map input arrives on, whichever engine draws the map. */
+  get eventEl() {
+    return this.container;
+  }
+
+  /**
+   * Draw the data layer (no base map) over a Web Mercator box into the
+   * renderer's canvas, w x h device pixels, transparent where there's no data.
+   * @param {{west: number, east: number, south: number, north: number}} b degrees
+   * @returns {HTMLCanvasElement} valid until the next render
+   */
+  renderFlat(b, w, h) {
+    if (!this.flat) {
+      const material = new THREE.ShaderMaterial({
+        uniforms: { ...this.uniforms, uFlatBounds: { value: new THREE.Vector4() } },
+        vertexShader: flatVertexShader,
+        fragmentShader,
+        defines: { FLAT: 1 },
+        depthTest: false,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+      mesh.frustumCulled = false;
+      const scene = new THREE.Scene();
+      scene.add(mesh);
+      this.flat = { scene, material, camera: new THREE.Camera() };
+    }
+    const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (Math.max(-85.06, Math.min(85.06, lat)) * D2R) / 2));
+    this.flat.material.uniforms.uFlatBounds.value.set(b.west, b.east, merc(b.south), merc(b.north));
+    const r = this.renderer;
+    r.setPixelRatio(1);
+    r.setSize(w, h, false);
+    r.setRenderTarget(null);
+    r.setClearColor(0x000000, 0);
+    r.clear();
+    r.render(this.flat.scene, this.flat.camera);
+    return r.domElement;
+  }
+
+  // ------------------------------------------------------------- image & video export
+  /** Draw at a higher pixel ratio until endCapture (export at a set size). */
+  beginCapture(pixelRatio) {
+    if (this.ext) return this.ext.beginCapture(pixelRatio);
+    this.renderer.setPixelRatio(pixelRatio);
+    this.resize();
+  }
+
+  /**
+   * The map as it is now, drawn this instant: the canvas holds it until the
+   * next frame, so read it straight away.
+   * @returns {Promise<HTMLCanvasElement>}
+   */
+  async snapshot() {
+    if (this.ext) return this.ext.snapshot();
+    this.#render();
+    return this.renderer.domElement;
+  }
+
+  endCapture() {
+    if (this.ext) return this.ext.endCapture();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.resize();
+    this.dirty = true;
+  }
+
+  /** lat/lon at the middle of the view. */
+  centerLatLon() {
+    if (this.ext) return this.ext.center();
+    const c = this.tiltState ? this.controls.target : this.camera.position;
+    return toLatLon(c.x, c.y, c.z);
   }
 
   #bindZoom() {
@@ -473,6 +615,7 @@ export class Globe {
   }
 
   zoomBy(factor) {
+    if (this.ext) return this.ext.zoomBy(factor);
     if (this.tiltState) {
       const c = this.controls;
       const off = this.camera.position.clone().sub(c.target);
@@ -485,7 +628,9 @@ export class Globe {
     this.targetDistance = 1 + Math.min(5.5, Math.max(0.03, alt * factor));
   }
 
-  flyTo(lat, lon, distance = this.targetDistance) {
+  flyTo(lat, lon, distance) {
+    if (this.ext) return this.ext.flyTo(lat, lon, distance === undefined ? null : distance - 1);
+    distance ??= this.targetDistance;
     const to = new THREE.Vector3(...toXYZ(lat, lon));
     if (this.tiltState) {
       // Tilted: glide the orbit point over, closing in only when asked to zoom in.
@@ -499,7 +644,7 @@ export class Globe {
 
   // ------------------------------------------------------------- tilted (3D) view
   get tilted() {
-    return !!this.tiltState;
+    return !this.ext && !!this.tiltState;
   }
 
   /**
@@ -681,6 +826,19 @@ export class Globe {
     const tick = (now) => {
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
+      if (this.ext) {
+        // MapLibre owns the view: redraw the data for it when that changed,
+        // and let the overlays follow its camera.
+        const moved = this.dirty || this.viewDirty;
+        if (this.dirty) this.ext.dataChanged();
+        if (moved) {
+          for (const fn of this.listeners.frame) fn(true);
+          for (const fn of this.listeners.change) fn();
+        }
+        this.dirty = this.viewDirty = false;
+        requestAnimationFrame(tick);
+        return;
+      }
       let moved = false;
       const cam = this.camera;
       if (this.tiltAnim) {
@@ -959,6 +1117,7 @@ export class Globe {
   }
 
   setLineStyle(name, { color, opacity, visible }) {
+    this.ext?.lineStyle(name, { color, opacity, visible });
     const l = this.lineLayers[name];
     if (!l) return;
     if (color !== undefined) l.material.color.set(color);
@@ -1008,6 +1167,7 @@ export class Globe {
   // ------------------------------------------------------------- geometry helpers
   /** Screen position (CSS px within the globe) of a lat/lon, or null on the far side. */
   project(lat, lon) {
+    if (this.ext) return this.ext.project(lat, lon);
     const cam = this.camera;
     cam.updateMatrixWorld();
     const [x, y, z] = toXYZ(lat, lon);
@@ -1021,12 +1181,14 @@ export class Globe {
 
   /** lat/lon under a client pixel, or null if off-globe. */
   pick(clientX, clientY) {
+    if (this.ext) return this.ext.pick(clientX, clientY);
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     return this.pickNdc(ndc.x, ndc.y);
   }
 
   pickNdc(x, y) {
+    if (this.ext) return this.ext.pick(...this.ext.ndcToClient(x, y));
     const p = this.#hitNdc(x, y);
     return p && toLatLon(p.x, p.y, p.z);
   }
@@ -1051,6 +1213,7 @@ export class Globe {
 
   /** Current camera altitude above the surface, in globe radii. */
   get altitude() {
+    if (this.ext) return this.ext.altitude();
     return this.camera.position.length() - 1;
   }
 }

@@ -2,7 +2,7 @@
 // name) and contour value labels, decluttered in screen space every frame.
 // Towns come from tools/build-places.mjs: the bigger places load at start and
 // small ones in 5° tiles once the map is zoomed in on their area.
-import { toXYZ } from './globe.js';
+import { toLatLon, toXYZ } from './globe.js';
 
 const MAX_CITY_LABELS = 700; // a safety net for the DOM; collisions normally limit it first
 const MAX_CONTOUR_LABELS = 28;
@@ -147,7 +147,15 @@ export class LabelLayer {
     const grid = new Map();
     let n = 0;
 
-    const project = (xyz) => {
+    const ext = g.ext;
+    const project = ext
+      ? (xyz) => {
+          const ll = toLatLon(...xyz);
+          const s = ext.project(ll.lat, ll.lon);
+          if (!s || s[0] < -20 || s[1] < -20 || s[0] > W + 20 || s[1] > H + 20) return null;
+          return s;
+        }
+      : (xyz) => {
       const [x, y, z] = xyz;
       if ((x * cx + y * cy + z * cz) / camLen < minDot) return null;
       const w = m[3] * x + m[7] * y + m[11] * z + m[15];

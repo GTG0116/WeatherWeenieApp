@@ -277,6 +277,45 @@ purple. The tooltip gives the value, plus range and bearing from the radar. Deco
 formats need. Colour tables are parsed in `colortables.js`. The site list is
 `public/data/radars.json`, built by `tools/build-radars.mjs`.
 
+## Settings: map style, map size, alerts, broadcast
+
+The gear button (map buttons, or **Settings** in the sidebar) opens a drawer beside the map:
+
+- **Map**: the built-in WebGL globe, or a **MapLibre GL** map (loaded from unpkg on demand) with
+  CARTO, OpenFreeMap, Esri satellite or a plain base map, or any style URL; globe or flat Mercator
+  projection; data opacity and whether the data sits under the labels, under roads too, or on top;
+  base-map layer groups on/off; land, water, boundary, road and label colours; label size;
+  hillshade; rotate and tilt. The map's own place labels stay hidden: town names and city values
+  are the app's on both engines. Model fields and radar are drawn by the same shader in Web Mercator
+  for the area in view (`Globe.renderFlat`) and handed to MapLibre as a canvas source. Wind
+  particles and the 3D radar view need the WebGL globe.
+- **Size**: frame the map at a social media size (X, Instagram square/portrait, stories, Facebook,
+  YouTube, 4:3 or custom). Only the map and what's drawn on it change: the sidebar, timeline and
+  buttons stay put.
+- **Alerts**: NWS watches, warnings and advisories from `api.weather.gov`, shown over radar (and
+  over model maps if asked). Every active type can be switched on or off and given its own colour,
+  fill and outline. Alerts without a polygon get their zone outlines from the API, simplified and
+  cached in IndexedDB. Clicking the map lists every alert at that spot in a draggable popup with
+  arrows between them; tags show impact-based details (wind, hail, radar indicated / observed,
+  considerable / destructive / catastrophic, PDS, EDS, emergencies). The alert's name opens the
+  full text.
+- **Broadcast**: a TV-style graphic with the logo, the product on screen, the model and run (or
+  the radar site), the weekday, date and time (local or UTC) and a colour key, in seven colour themes or your own colours, with an optional
+  tagline and uploaded logo. "Clean screen" hides the app's controls; it's off by default so
+  everything stays adjustable.
+
+The **camera** button saves a PNG and the **video** button records an MP4 (H.264 through WebCodecs,
+muxed with mp4-muxer; Chrome, Edge, Safari) or a looping GIF (gifenc), both at the size picked in
+Settings › Size (or the window at screen resolution), optionally scaled to 75% or 50%. Pick the
+frames (all, every 2nd/3rd, the latest scans, or click and shift-click), how long each one shows
+and how long to hold the last. The map is drawn again at the export's pixel ratio and the labels,
+broadcast graphic (or title and legend) are painted over it, so files match the screen.
+
+Radar **Resolution** (with the tilts) applies to every NEXRAD product: CC, ZDR and KDP switch to
+their Level III legacy products; reflectivity, velocity and spectrum width, whose legacy Level III
+files are no longer published, show the super-res scan resampled to 1° radials (1 km gates for
+reflectivity).
+
 ## How it works
 
 ```

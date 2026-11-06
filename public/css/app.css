@@ -879,7 +879,8 @@ body.panel-hidden #status {
   opacity: 0.35;
   cursor: not-allowed;
 }
-canvas.picking {
+canvas.picking,
+.picking canvas {
   cursor: crosshair !important;
 }
 #tool-overlay {

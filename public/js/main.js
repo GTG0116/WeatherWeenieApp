@@ -15,6 +15,11 @@ import { PTYPE_UNKNOWN, radarProductById } from './radar/products.js';
 import { STALE_MS, ago } from './radar/source.js';
 import { Radar3D } from './radar/volume.js';
 import { RadarSectionPanel } from './radar/xsect.js';
+import { COLOR_KEYS, LAYER_GROUPS, MAP_STYLES, MapLibreEngine, mapSettings } from './map/maplibre.js';
+import { AlertLayer, alertSettings } from './alerts.js';
+import { Broadcast, broadcastSettings } from './broadcast.js';
+import { frameSettings, frameSize, layoutFrame, renderFramePanel } from './frame.js';
+import { Exporter } from './export.js';
 
 const $ = (sel) => document.querySelector(sel);
 const STORE_KEY = 'model-globe-state-v1';
@@ -62,6 +67,10 @@ const state = {
   cityValues:
     saved.cityValues ??
     (saved.overlays?.cityValues === false ? Object.fromEntries(PRODUCTS.filter((p) => p.cityValues).map((p) => [p.id, false])) : {}),
+  map: mapSettings(saved.map), // map engine (globe or MapLibre) and the MapLibre look
+  alerts: alertSettings(saved.alerts),
+  broadcast: broadcastSettings(saved.broadcast),
+  frame: frameSettings(saved.frame), // map size for social media posts
   runs: [],
   run: null,
   stepIndex: 0,
@@ -83,6 +92,10 @@ function persist() {
         units: state.units,
         overlays: state.overlays,
         cityValues: state.cityValues,
+        map: state.map,
+        alerts: state.alerts,
+        broadcast: state.broadcast,
+        frame: state.frame,
       }),
     );
   } catch {
@@ -153,6 +166,255 @@ const radar3d = new Radar3D({
     if (radarMode()) render();
   },
 });
+
+// ------------------------------------------------------------------ broadcast & alerts
+const broadcast = new Broadcast(state.broadcast, persist);
+const alerts = new AlertLayer({
+  globe,
+  settings: state.alerts,
+  onSettings: persist,
+  timeMode: () => state.broadcast.timeMode,
+});
+alerts.onToggle = () => syncAlerts();
+broadcast.onTimeMode = () => updateBroadcast();
+// Watches and warnings show over radar, and over model maps when asked for.
+const syncAlerts = () => alerts.setVisible(radarMode() || state.alerts.onModels);
+
+// ------------------------------------------------------------------ image & video export
+/** Show timeline frame i and resolve once it's drawn (for video recording). */
+async function showFrame(i) {
+  state.stepIndex = Math.max(0, Math.min(frameCount() - 1, i));
+  syncTimeline();
+  await render();
+}
+
+const exporter = new Exporter({
+  globe,
+  frameSize: () => frameSize(state.frame),
+  current: () => state.stepIndex,
+  showFrame,
+  broadcastOn: () => state.broadcast.on,
+  setPlaying: (on) => setPlaying(on),
+  setStatus: (...a) => setStatus(...a),
+  isRadar: () => radarMode(),
+  frames: () => {
+    if (radarMode()) {
+      return radar.frames.map((f) => {
+        const t = new Date(f.time);
+        return { label: t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), sub: t.toLocaleString('en-US') };
+      });
+    }
+    if (!state.run) return [];
+    return steps().map((s) => {
+      const t = new Date(runTime(state.run) + s * 3600e3);
+      return { label: `F${String(s).padStart(3, '0')}`, sub: t.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' }) };
+    });
+  },
+  fileBase: () => {
+    const clean = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (radarMode()) return clean(`${radar.site?.id ?? 'radar'}-${radar.product?.short ?? ''}`);
+    const opt = option();
+    return clean(`${state.model}-${state.productId}${opt != null ? `-${opt}` : ''}-${state.run?.date ?? ''}${String(state.run?.hour ?? '').padStart(2, '0')}z`);
+  },
+});
+
+// ------------------------------------------------------------------ settings drawer
+// Map style, map size, alerts and broadcast options live here, beside the map.
+let relayout = () => {};
+const SETTINGS_TAB_KEY = 'model-globe-settings-tab';
+
+function openSettings(tab) {
+  const el = $('#settings');
+  let t = tab;
+  try {
+    t ??= localStorage.getItem(SETTINGS_TAB_KEY);
+  } catch {
+    // no storage: first tab
+  }
+  if (!el.querySelector(`[data-tab="${t}"]`)) t = 'map';
+  el.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+  el.querySelectorAll('[data-pane]').forEach((p) => (p.hidden = p.dataset.pane !== t));
+  try {
+    localStorage.setItem(SETTINGS_TAB_KEY, t);
+  } catch {
+    // fine
+  }
+  el.hidden = false;
+  document.body.classList.add('settings-open');
+  document.querySelectorAll('#map-tools .settings-open').forEach((b) => b.classList.add('active'));
+  relayout();
+}
+
+function closeSettings() {
+  $('#settings').hidden = true;
+  document.body.classList.remove('settings-open');
+  document.querySelectorAll('#map-tools .settings-open').forEach((b) => b.classList.remove('active'));
+  relayout();
+}
+
+function bindSettings() {
+  document.querySelectorAll('.settings-open').forEach((b) =>
+    b.addEventListener('click', () => ($('#settings').hidden ? openSettings() : closeSettings())),
+  );
+  $('#settings-close').addEventListener('click', closeSettings);
+  document.querySelectorAll('#settings [data-tab]').forEach((b) => b.addEventListener('click', () => openSettings(b.dataset.tab)));
+  renderFramePanel($('#frame-settings'), state.frame, () => {
+    persist();
+    relayout();
+  });
+}
+
+// ------------------------------------------------------------------ map engine
+// The built-in WebGL globe, or a MapLibre GL map (vector/satellite base maps,
+// globe or Mercator projection) with the same data drawn on it.
+let maplibre = null;
+let engineBusy = null;
+const mapLibreOn = () => !!maplibre?.ready;
+
+async function setEngine(kind, { save = true } = {}) {
+  if (save) {
+    state.map.engine = kind;
+    persist();
+  }
+  await engineBusy;
+  if ((kind === 'maplibre') === mapLibreOn()) return buildMapPanel();
+  engineBusy = (async () => {
+    if (kind === 'maplibre') {
+      radar3d.toggle(false);
+      const el = document.createElement('div');
+      el.id = 'maplibre';
+      globe.container.appendChild(el);
+      setStatus('Loading MapLibre GL…');
+      const eng = new MapLibreEngine(globe, el, state.map, { onError: (msg) => setStatus(`Map style: ${msg}`, 'error') });
+      try {
+        await eng.init();
+        maplibre = eng;
+        setStatus('MapLibre map ready', 'done');
+      } catch (err) {
+        el.remove();
+        state.map.engine = 'globe';
+        persist();
+        setStatus(`Couldn't start MapLibre: ${err.message}`, 'error');
+      }
+    } else if (maplibre) {
+      const el = maplibre.container;
+      maplibre.destroy();
+      el.remove();
+      maplibre = null;
+    }
+    document.body.classList.toggle('maplibre', mapLibreOn());
+    alerts.setEngine(maplibre);
+    applyLineTheme();
+    if (mapLibreOn()) particles.clear();
+    particles.setEnabled(!mapLibreOn() && state.overlays.particles && !!current?.vectors);
+    globe.setCenterOffset(globe.centerOffset ?? 0);
+    globe.requestRender();
+    buildOverlays();
+    buildMapPanel();
+  })();
+  return engineBusy;
+}
+
+/** The "Map" sidebar block: engine switch, and the MapLibre look when it's on. */
+function buildMapPanel() {
+  const el = $('#map-settings');
+  const m = state.map;
+  const on = m.engine === 'maplibre';
+  const opt = (v, label, cur) => `<option value="${v}"${v === cur ? ' selected' : ''}>${label}</option>`;
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  el.innerHTML = `
+    <div class="segmented" data-act="engine">
+      <button data-v="globe" class="${on ? '' : 'active'}">WebGL globe</button>
+      <button data-v="maplibre" class="${on ? 'active' : ''}">MapLibre map</button>
+    </div>
+    ${
+      on
+        ? `<label class="field-row"><span>Style</span><select data-act="style">${MAP_STYLES.map((s) => opt(s.id, s.name, m.style)).join('')}</select></label>
+      ${m.style === 'custom' ? `<label class="field-row"><span>URL</span><input type="url" data-act="customUrl" placeholder="https://…/style.json" value="${m.customUrl.replace(/"/g, '&quot;')}" /></label>` : ''}
+      <div class="segmented" data-act="projection">
+        <button data-v="globe" class="${m.projection !== 'mercator' ? 'active' : ''}">Globe</button>
+        <button data-v="mercator" class="${m.projection === 'mercator' ? 'active' : ''}">Flat (Mercator)</button>
+      </div>
+      <label class="slider-row"><span>Data opacity</span><output>${pct(m.dataOpacity)}</output><input type="range" min="0.1" max="1" step="0.05" value="${m.dataOpacity}" data-act="dataOpacity" /></label>
+      <label class="field-row"><span>Data</span><select data-act="dataPlacement">${opt('below-labels', 'Under the labels', m.dataPlacement)}${opt('below-roads', 'Under roads & labels', m.dataPlacement)}${opt('top', 'Over everything', m.dataPlacement)}</select></label>
+      <div class="map-sub">Show</div>
+      <div class="chips">${LAYER_GROUPS.map(([k, label]) => `<button class="chip${m.layers[k] ? ' on' : ''}" data-layer="${k}">${label}</button>`).join('')}</div>
+      <div class="map-sub">Colours <button class="mini-btn" data-act="colors-reset">Style's own</button></div>
+      <div class="bc-colors">${COLOR_KEYS.map(([k, label]) => `<label class="${m.colors[k] ? 'set' : ''}"><input type="color" data-color="${k}" value="${m.colors[k] ?? '#808080'}" />${label}</label>`).join('')}</div>
+      <div class="toggle${m.hillshade ? ' on' : ''}" data-act="hillshade"><span>Hillshade<span class="sub">Terrain shading under the data</span></span><span class="switch"></span></div>
+      ${m.hillshade ? `<label class="slider-row"><span>Shading</span><output>${pct(m.hillshadeStrength)}</output><input type="range" min="0.05" max="1" step="0.05" value="${m.hillshadeStrength}" data-act="hillshadeStrength" /></label>` : ''}
+      <div class="toggle${m.rotate ? ' on' : ''}" data-act="rotate"><span>Rotate &amp; tilt<span class="sub">Right-drag turns the map (box soundings: use the B tool)</span></span><span class="switch"></span></div>`
+        : '<div class="hint-row">Switch to MapLibre for street, satellite and custom base maps.</div>'
+    }`;
+  const eng = () => (mapLibreOn() ? maplibre : null);
+  el.querySelectorAll('[data-act="engine"] button').forEach((b) => b.addEventListener('click', () => setEngine(b.dataset.v)));
+  el.querySelectorAll('[data-act="projection"] button').forEach((b) =>
+    b.addEventListener('click', () => {
+      m.projection = b.dataset.v;
+      persist();
+      eng()?.setProjection();
+      buildMapPanel();
+    }),
+  );
+  el.querySelector('[data-act="style"]')?.addEventListener('change', (e) => {
+    m.style = e.target.value;
+    persist();
+    if (m.style !== 'custom' || m.customUrl) eng()?.reloadStyle();
+    buildMapPanel();
+  });
+  el.querySelector('[data-act="customUrl"]')?.addEventListener('change', (e) => {
+    m.customUrl = e.target.value.trim();
+    persist();
+    if (m.customUrl) eng()?.reloadStyle();
+  });
+  el.querySelector('[data-act="dataPlacement"]')?.addEventListener('change', (e) => {
+    m.dataPlacement = e.target.value;
+    persist();
+    eng()?.placeData();
+  });
+  el.querySelectorAll('input[type="range"]').forEach((inp) =>
+    inp.addEventListener('input', () => {
+      const k = inp.dataset.act;
+      m[k] = Number(inp.value);
+      inp.previousElementSibling.textContent = pct(m[k]);
+      persist();
+      eng()?.applyTweaks();
+    }),
+  );
+  el.querySelectorAll('.chip[data-layer]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const k = b.dataset.layer;
+      m.layers[k] = !m.layers[k];
+      b.classList.toggle('on', m.layers[k]);
+      persist();
+      eng()?.applyTweaks();
+    }),
+  );
+  el.querySelectorAll('input[data-color]').forEach((inp) =>
+    inp.addEventListener('input', () => {
+      m.colors[inp.dataset.color] = inp.value;
+      inp.parentElement.classList.add('set');
+      persist();
+      eng()?.applyTweaks();
+    }),
+  );
+  el.querySelector('[data-act="colors-reset"]')?.addEventListener('click', () => {
+    for (const k of Object.keys(m.colors)) m.colors[k] = null;
+    persist();
+    eng()?.reloadStyle();
+    buildMapPanel();
+  });
+  el.querySelectorAll('.toggle[data-act]').forEach((t) =>
+    t.addEventListener('click', () => {
+      const k = t.dataset.act;
+      m[k] = !m[k];
+      persist();
+      if (k === 'hillshade') eng()?.setHillshade();
+      else if (k === 'rotate') eng()?.setRotate();
+      buildMapPanel();
+    }),
+  );
+}
 
 // ------------------------------------------------------------------ HRRR for radar
 // Radar precipitation type comes from the latest HRRR run's forecast hour 1;
@@ -447,10 +709,13 @@ function buildOverlays() {
     persist();
     buildOverlays();
     if (key === 'borders' || key === 'counties') applyLineTheme();
-    else if (key === 'particles') particles.setEnabled(state.overlays.particles && !!current?.vectors);
+    else if (key === 'particles') particles.setEnabled(!mapLibreOn() && state.overlays.particles && !!current?.vectors);
     else render();
   };
-  if (!radarMode()) add('particles', 'Wind particles', p.particles ? null : 'Wind products only', !!p.particles, state.overlays.particles, flip('particles'));
+  if (!radarMode()) {
+    const why = mapLibreOn() ? 'WebGL globe only' : p.particles ? null : 'Wind products only';
+    add('particles', 'Wind particles', why, !!p.particles && !mapLibreOn(), state.overlays.particles, flip('particles'));
+  }
   if (radarMode()) {
     // no contours or isobars over radar
   } else if (p.group === 'upper') {
@@ -579,6 +844,7 @@ async function enterRadar() {
   $('#legend').innerHTML = '';
   syncProductButtons();
   buildOverlays();
+  syncAlerts();
   setStatus('Loading radar sites…');
   try {
     await radar.activate();
@@ -607,6 +873,7 @@ function leaveRadar() {
   current = null;
   globe.clearLayer();
   persist();
+  syncAlerts();
 }
 
 /** A product this kind of run lacks (RRFS's surface-only hourly runs): switch to the newest run that has it. */
@@ -739,7 +1006,10 @@ function buildTimeline() {
 }
 
 function syncTimeline() {
-  if (radarMode()) return syncRadarTimeline();
+  if (radarMode()) {
+    syncRadarTimeline();
+    return updateBroadcast();
+  }
   const input = $('#step');
   input.value = state.stepIndex;
   const n = Math.max(1, steps().length - 1);
@@ -750,6 +1020,7 @@ function syncTimeline() {
     ' ' + String(t.getUTCHours()).padStart(2, '0') + 'Z';
   $('#valid-local').textContent = t.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
   $('#fhour').textContent = 'F' + String(step()).padStart(3, '0');
+  updateBroadcast();
 }
 
 /** Whether a step of the current view is ready without fetching anything. */
@@ -1036,7 +1307,7 @@ async function doRender(seq) {
 
   if (res.vectors) {
     particles.setField(res.vectors.u, res.vectors.v, meta, p.particleSpeed ?? 1);
-    particles.setEnabled(state.overlays.particles);
+    particles.setEnabled(state.overlays.particles && !mapLibreOn());
   } else {
     particles.clear();
     particles.setEnabled(false);
@@ -1143,6 +1414,84 @@ function updateCityValues() {
   });
 }
 
+// ------------------------------------------------------------------ broadcast graphic
+/** CSS gradient of a colormap row, from where its colours first show to the top. */
+function cmGradient(cm, row = 0) {
+  let t0 = 0;
+  for (let i = 0; i < 64; i++) {
+    if (cm.color(cm.valueAt(i / 64), row)[3] > 40) {
+      t0 = i / 64;
+      break;
+    }
+  }
+  const stops = [];
+  for (let i = 0; i <= 14; i++) {
+    const c = cm.color(cm.valueAt(t0 + ((1 - t0) * i) / 14), row);
+    stops.push(`rgb(${c[0]},${c[1]},${c[2]})`);
+  }
+  return { css: `linear-gradient(90deg, ${stops.join(',')})`, t0 };
+}
+
+/** Product title, valid/scan time and colour key for the broadcast graphic. */
+function updateBroadcast() {
+  if (!state.broadcast.on) return;
+  let productText = '';
+  let time = null;
+  let legend = null;
+  const cur = current;
+  let sub = '';
+  if (radarMode()) {
+    productText = radar.product?.name ?? '';
+    time = radar.frames[state.stepIndex]?.time ?? null;
+    const s = radar.site;
+    if (s) sub = `${s.id} · ${s.name}${s.region ? `, ${s.region}` : ''}`;
+  } else if (state.run) {
+    const p = product();
+    const opt = option();
+    const o = p.options?.find((x) => x.value === opt);
+    productText = typeof opt === 'number' && p.group === 'upper' ? `${opt} mb ${p.name}` : o && p.options.length > 1 ? `${p.name} ${o.label}` : p.name;
+    time = runTime(state.run) + step() * 3600e3;
+    const r = state.run;
+    const rt = new Date(runTime(r));
+    const utc = state.broadcast.timeMode === 'utc';
+    const runText = utc
+      ? `${String(r.hour).padStart(2, '0')}Z ${rt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(',', '')}`
+      : `${rt.toLocaleTimeString('en-US', { hour: 'numeric', timeZoneName: 'short' })} ${rt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).replace(',', '')}`;
+    sub = `${modelName()}${memberName()} · ${runText} run · F${String(step()).padStart(3, '0')}`;
+  }
+  if (cur) {
+    const p = cur.product;
+    const cm = p.colormap(cur.option);
+    const typed = p.typeRows ?? (p.precipLegend ? PRECIP_TYPES : null);
+    if (typed) {
+      // Rain / mixed / snow, as on TV.
+      const find = (re) => typed.find((r) => re.test(r.name));
+      const rows = [
+        ['Rain', typed.find((r) => /rain/i.test(r.name) && !/frz|freez/i.test(r.name))],
+        ['Mixed', find(/sleet|mix/i)],
+        ['Snow', find(/snow/i)],
+      ].filter(([, r]) => r);
+      legend = { segments: rows.map(([label, r]) => ({ label, gradient: cmGradient(cm, r.row).css })) };
+    } else {
+      const u = unitFor(p.unit, state.units);
+      const g = cmGradient(cm, 0);
+      const [d0, d1] = cm.domain;
+      const lo = Math.min(u.f(d0), u.f(d1));
+      const hi = Math.max(u.f(d0), u.f(d1));
+      const all = p.legendTicks?.(state.units, cur.option) ?? niceTicks(lo, hi, 6);
+      const ticks = [];
+      for (const t of all) {
+        const pos = (cm.position(u.inv(t)) - g.t0) / (1 - g.t0);
+        if (pos < 0.03 || pos > 0.97) continue;
+        if (ticks.length && pos - ticks[ticks.length - 1].pos < 0.11) continue;
+        ticks.push({ pos, label: p.legendLabel ? p.legendLabel(t) : String(t) });
+      }
+      legend = { segments: [{ gradient: g.css, ticks }], unit: p.classes ? '' : u.label };
+    }
+  }
+  broadcast.update({ product: productText, sub, time, legend });
+}
+
 // ------------------------------------------------------------------ legend
 function niceTicks(lo, hi, target = 8) {
   const span = hi - lo;
@@ -1157,6 +1506,7 @@ function niceTicks(lo, hi, target = 8) {
 function drawLegend() {
   const cur = current;
   const el = $('#legend');
+  updateBroadcast();
   if (!cur) return;
   const p = cur.product;
   const cm = p.colormap(cur.option);
@@ -1465,8 +1815,30 @@ function bindEvents() {
     globe.flyTo(37, -92, globe.homeDistance);
   });
   document.querySelectorAll('#map-tools .tool').forEach((b) => b.addEventListener('click', () => tools.toggle(b.dataset.tool)));
-  const syncOffset = () =>
-    globe.setCenterOffset(window.innerWidth > 760 && !document.body.classList.contains('panel-hidden') ? 145 : 0);
+  const syncOffset = () => {
+    layoutFrame(state.frame);
+    // A framed map already sits clear of the sidebar.
+    const framed = document.body.classList.contains('framed');
+    globe.setCenterOffset(!framed && window.innerWidth > 760 && !document.body.classList.contains('panel-hidden') ? 145 : 0);
+    alerts.reposition();
+    // The broadcast graphic stays clear of the sidebar when the map runs under it.
+    const sr = $('#stage').getBoundingClientRect();
+    const pr = $('#panel').getBoundingClientRect();
+    const covered = window.innerWidth > 760 && !document.body.classList.contains('panel-hidden') && !document.body.classList.contains('broadcast-clean') && pr.right > sr.left + 4;
+    $('#broadcast').style.left = covered ? `${Math.round(pr.right - sr.left + 14)}px` : '';
+    broadcast.refit();
+  };
+  relayout = syncOffset;
+  broadcast.onApply = () => {
+    $('#broadcast-toggle').classList.toggle('active', state.broadcast.on);
+    syncOffset();
+    updateBroadcast();
+  };
+  $('#broadcast-toggle').addEventListener('click', () => broadcast.setOn(!state.broadcast.on));
+  $('#save-image').addEventListener('click', () => exporter.saveImage());
+  $('#record-video').addEventListener('click', () => exporter.openVideo());
+  $('#broadcast-toggle').classList.toggle('active', state.broadcast.on);
+  bindSettings();
   const showPanel = (on) => {
     document.body.classList.toggle('panel-hidden', !on);
     syncOffset();
@@ -1480,7 +1852,7 @@ function bindEvents() {
   });
   syncOffset();
 
-  const canvas = globe.renderer.domElement;
+  const canvas = globe.eventEl; // the globe's canvas or the MapLibre map, whichever is shown
   let dragging = false;
   let downAt = null;
   canvas.addEventListener('pointerdown', (e) => {
@@ -1516,9 +1888,29 @@ function bindEvents() {
     if (performance.now() - touchZoomAt < 700) return; // a double tap, already handled
     zoomAt(e.clientX, e.clientY);
   });
+  // Click (or tap) on an alert area: every alert at that spot, in a popup.
+  const alertClick = (x, y) => {
+    if (tools.mode || radar3d.picking || !alerts.visible) return false;
+    const ll = globe.pick(x, y);
+    const hits = ll ? alerts.hitTest(ll.lat, ll.lon) : [];
+    if (!hits.length) {
+      alerts.closePopup();
+      return false;
+    }
+    $('#tooltip').style.display = 'none';
+    alerts.openPopup(hits, ll.lat, ll.lon);
+    return true;
+  };
+  canvas.addEventListener('click', (e) => {
+    if (e.pointerType === 'touch' || (e.target.closest && e.target.closest('.maplibregl-ctrl'))) return; // taps: see bindTouch
+    if (downAt && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
+    if (performance.now() - tools.lastPick < 400) return;
+    alertClick(e.clientX, e.clientY);
+  });
   bindTouch(canvas, {
     tap(x, y) {
       if (tools.mode || radar3d.picking) return; // the tool takes the tap
+      if (alertClick(x, y)) return;
       lastPointer = { x, y, touch: true };
       refreshTooltip();
     },
@@ -1565,12 +1957,20 @@ function bindEvents() {
     const key = e.key.toLowerCase();
     const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
     if (e.key === 'Escape' && !$('#radar-menu').hidden) closeRadarMenu();
-    else if (e.key === 'Escape') {
+    else if (e.key === 'Escape' && alerts.isOpen) alerts.closeTop();
+    else if (e.key === 'Escape' && exporter.isOpen) exporter.closeVideo();
+    else if (exporter.isOpen) return;
+    else if (e.key === 'Escape' && !$('#settings').hidden) closeSettings();
+    else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && alerts.step(e.key === 'ArrowLeft' ? -1 : 1)) {
+      // stepping through the alerts in the full-text view
+    } else if (e.key === 'Escape' && document.body.classList.contains('broadcast-clean') && !tools.mode && !sounding.isOpen && !xsect.isOpen && !radarXsect.isOpen) {
+      broadcast.setOn(false);
+    } else if (e.key === 'Escape') {
       if (tools.mode) tools.setMode(null);
       else if (radarXsect.isOpen) radarXsect.close();
       else if (xsect.isOpen) xsect.close();
       else sounding.close();
-    } else if (radarMode() && key === '3' && plain) {
+    } else if (radarMode() && key === '3' && plain && !mapLibreOn()) {
       radar3d.toggle();
     } else if (radarMode() && RADAR_KEYS[key] && plain) {
       const rp = radarProductById[RADAR_KEYS[key]];
@@ -1616,6 +2016,7 @@ function bindEvents() {
 // ------------------------------------------------------------------ boot
 Object.assign(window.modelGlobe.actions, { setModel, selectProduct, setStep, render, enterRadar });
 window.modelGlobe.radar = radar;
+Object.assign(window.modelGlobe, { alerts, broadcast, map: () => maplibre });
 
 async function boot() {
   buildModels();
@@ -1625,7 +2026,12 @@ async function boot() {
   buildOptions();
   buildOverlays();
   buildUnits();
+  buildMapPanel();
+  alerts.bindPanel($('#alerts-panel'));
+  broadcast.bindPanel($('#broadcast-panel'));
   bindEvents();
+  if (state.map.engine === 'maplibre') setEngine('maplibre', { save: false });
+  syncAlerts();
   loadGeo().catch((err) => console.error('geo', err));
   globe.loadBase().catch((err) => console.error('base map', err));
   fixOption();
