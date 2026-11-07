@@ -90,11 +90,17 @@ const tpFromBuckets = (hours) => ({
 });
 // Snow water since F000 (m) from precipitation buckets and the categorical snow flag
 // averaged over the same interval (GEFS: the share of the bucket that fell as snow).
+// Built per member; the ensemble mean is the average of the members' totals
+// (`meanOfMembers`, see DataSource), not computed from the published mean file:
+// NCEP's mean file carries a yes/no snow flag (snow in most members), so mean
+// precipitation × that flag drops snow wherever under half the members have it
+// and gives all the mean precipitation to snow where just over half do.
 const sfFromBuckets = (hours) => ({
   zeroAtStart: true,
+  meanOfMembers: true,
   needs: (level, ctx) => {
     const start = ctx.step > 0 ? Math.floor((ctx.step - 1) / hours) * hours : 0;
-    return { b: { param: 'apcp' }, s: { param: 'csnow' }, ...(start > 0 ? { prev: { param: 'sfb', stepOffset: start - ctx.step } } : {}) };
+    return { b: { param: 'apcp' }, s: { param: 'csnow' }, ...(start > 0 ? { prev: { param: 'sf', stepOffset: start - ctx.step } } : {}) };
   },
   make: ({ b, s, prev }) => {
     const out = new Float32Array(b.values.length);
@@ -571,12 +577,12 @@ export const MODELS = {
       '2d': dewpointFromRh2,
       vo: vortFromWinds,
       tp: tpFromBuckets(6),
-      sfb: sfFromBuckets(6), // for snowfall probabilities (the snowfall maps split precipitation by type)
+      sf: sfFromBuckets(6), // snowfall maps and probabilities; the mean averages the members
       tprate: tprateFromBucket(6),
       ptype: { ...ptypeCategorical, zeroAtStart: true }, // F000 has no precip-type flags
       dcape: dcapeFrom(DCAPE_ENS),
     },
-    notes: { tprate: 'mean over the latest 3–6 h' },
+    notes: { tprate: 'mean over the latest 3–6 h', sf: '10:1, precipitation × snow flag' },
     profile: PROFILE_ENS,
   },
   ens: {

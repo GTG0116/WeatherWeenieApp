@@ -209,7 +209,13 @@ wins over a recipe of the same name):
   (WOOF-NAM). REFS and NBM rates are their published 1-hour amounts, read as rates.
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
-* snowfall for models without a snowfall field: precipitation × snow share from precip type
+* snowfall for models without a snowfall field: precipitation × snow share from precip type;
+  GEFS: each member's 6-hour buckets × its snow flag, and the **mean is the average of the
+  31 members' totals**. NCEP's published mean file only carries a yes/no snow flag (snow in
+  most members), so mean precipitation × that flag would drop snow wherever fewer than half
+  the members have it. Averaging means downloading every member, like a probability:
+  several seconds a frame stepping forward, a minute or more when jumping straight to a late
+  hour (finished means are kept in IndexedDB)
 
 Kuchera snowfall uses the column's maximum temperature (2 m, 925, 850, 700 hPa, skipping
 levels below ground), so it needs surface pressure; ICON's Open-Meteo files don't carry

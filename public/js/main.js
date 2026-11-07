@@ -6,7 +6,7 @@ import { Accumulator, KINDS } from './accum.js';
 import { PRODUCTS, PTYPE_CATEGORY, PTYPE_NAMES, accumulationOf, isobarContour, productAvailable, productById } from './products.js';
 import { PRECIP_TYPES } from './colormaps.js';
 import { unitFor } from './units.js';
-import { MODELS, ensembleMembers, hasProfiles, membersOf, supports } from './models.js';
+import { MODELS, ensembleMembers, hasProfiles, membersOf, recipeFor, supports } from './models.js';
 import { MapTools } from './tools.js';
 import { SoundingPanel } from './sounding.js';
 import { CrossSectionPanel } from './xsect.js';
@@ -136,11 +136,12 @@ const globe = new Globe($('#globe'));
 const labels = new LabelLayer($('#labels'), globe);
 const particles = new WindParticles(globe);
 const data = new DataSource();
-// Counting ensemble members for a probability: show progress for the hour on screen.
-data.onProgress = ({ model, run, step: s, done, total }) => {
-  if (model === state.model && run === runKey() && s === step() && product().prob && done < total) {
-    setStatus(`Counting ensemble members · ${done}/${total}…`);
-  }
+// Counting ensemble members for a probability, or averaging them for a mean
+// (GEFS snowfall): show progress for the hour on screen.
+data.onProgress = ({ model, run, step: s, done, total, kind }) => {
+  if (model !== state.model || run !== runKey() || s !== step() || done >= total) return;
+  if (kind === 'mean') setStatus(`Averaging ensemble members · ${done}/${total}…`);
+  else if (product().prob) setStatus(`Counting ensemble members · ${done}/${total}…`);
 };
 const accum = new Accumulator(data);
 let current = null; // what's on the globe now
@@ -1455,8 +1456,10 @@ async function preload(seq) {
   const i0 = state.stepIndex;
   const todo = [...all.slice(i0 + 1), ...all.slice(0, i0)].filter((s) => !checkStep(p, option(), s) && !data.has(model, run.id, s, spec));
   if (!todo.length) return report(true);
-  // A few frames at once; locally averaged ensemble means are many downloads each.
-  const parallel = p.prob || (MODELS[model].members?.mean === 'computed' && state.member === 'mean') ? 2 : 4;
+  // A few frames at once; locally averaged ensemble means (and GEFS snowfall, the
+  // mean of every member's total) are many downloads each.
+  const memberMean = state.member === 'mean' && Object.values(spec).some((x) => recipeFor(model, x.param, x.level, 'mean')?.meanOfMembers);
+  const parallel = p.prob || memberMean || (MODELS[model].members?.mean === 'computed' && state.member === 'mean') ? 2 : 4;
   let next = 0;
   const lane = async () => {
     while (next < todo.length && live() && !data.full()) {
