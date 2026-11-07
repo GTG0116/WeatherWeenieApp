@@ -196,14 +196,17 @@ after 120 h, AIGFS is 6-hourly), the app says so instead of drawing something mi
 GEFS (6-hour buckets) and REFS (1-hour buckets) publish precipitation that restarts every
 bucket; their run totals are built by adding the buckets up.
 
-**Locally derived fields**, where a model doesn't publish one:
-* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles); from absolute vorticity for the
-  NCEP deterministic models
+**Locally derived fields**, only where a model doesn't publish one (a published field always
+wins over a recipe of the same name):
+* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles, WOOF-NAM, GDPS away from the
+  200/250/500/700/850 hPa levels it publishes); from absolute vorticity for the NCEP
+  deterministic models
 * precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS, WOOF-NAM),
   NCEP's categorical rain/snow/sleet/freezing-rain flags (GFS, HRRR, RRFS, RAP, GEFS, REFS),
   or the weather code (ICON)
-* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEFS,
-  GEPS), or from the 1-hour bucket (REFS), or as a 1-hour mean from the 12-hour buckets (WOOF-NAM)
+* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEPS), the
+  mean over the latest 3–6 h bucket (GEFS), or a 1-hour mean from the 12-hour buckets
+  (WOOF-NAM). REFS and NBM rates are their published 1-hour amounts, read as rates.
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
 * snowfall for models without a snowfall field: precipitation × snow share from precip type

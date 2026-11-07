@@ -4,7 +4,8 @@
 // Canonical params: 2t 2d 10u 10v 10fg sbcape mlcape mucape sbcin mlcin mucin
 // srh1 srh3 ush6 vsh6 ltng dcape msl sp tp sf tprate ptype refc tcc lcc mcc hcc vis
 // (surface) and t gh u v vo r (pressure levels). Accumulations
-// (tp, sf) are metres of water since F000.
+// (tp, sf) are metres of water since F000; visibility is metres. Ensemble
+// probabilities are params too ("prob:…", see probability.js).
 import { ecmwfSource, fetchRetry, mscSource, ncepSource, openMeteoSource, range } from './sources.js';
 import {
   classifyPrecipType, dewpointFromRh, ptypeFromCategorical, ptypeFromWmo, relativeVorticity, vorticity,
@@ -84,6 +85,20 @@ const tpFromBuckets = (hours) => ({
   make: ({ b, prev }) => {
     const out = new Float32Array(b.values.length);
     for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) + (prev ? prev.values[i] : 0);
+    return out;
+  },
+});
+// Snow water since F000 (m) from precipitation buckets and the categorical snow flag
+// averaged over the same interval (GEFS: the share of the bucket that fell as snow).
+const sfFromBuckets = (hours) => ({
+  zeroAtStart: true,
+  needs: (level, ctx) => {
+    const start = ctx.step > 0 ? Math.floor((ctx.step - 1) / hours) * hours : 0;
+    return { b: { param: 'apcp' }, s: { param: 'csnow' }, ...(start > 0 ? { prev: { param: 'sfb', stepOffset: start - ctx.step } } : {}) };
+  },
+  make: ({ b, s, prev }) => {
+    const out = new Float32Array(b.values.length);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(0, b.values[i]) * Math.min(1, Math.max(0, s.values[i])) + (prev ? prev.values[i] : 0);
     return out;
   },
 });
@@ -764,6 +779,35 @@ export const MODELS = {
     }),
     derived: { vo: vortFromAbsv, ptype: ptypeCategorical, dcape: dcapeFrom(DCAPE_FINE) },
     profile: PROFILE_HIRES,
+  },
+  nbm: {
+    name: 'NBM',
+    label: 'NBM',
+    sub: 'CONUS 2.5 km',
+    group: 'regional',
+    regional: true,
+    credit: 'NOAA National Blend of Models via AWS Open Data',
+    source: ncepSource({
+      bucket: 'https://noaa-nbm-grib2-pds.s3.amazonaws.com',
+      files: { sfc: (r, s) => `blend.${r.date}/${r.hh}/core/blend.t${r.hh}z.core.f${p3(s)}.co.grib2` },
+      listing: { sfc: { prefix: (r) => `blend.${r.date}/${r.hh}/core/blend.t${r.hh}z.core.f`, re: /\.f(\d{3})\.co\.grib2\.idx$/ } },
+      cycle: 1,
+      search: 8,
+      maxRuns: 6,
+      steps: nbmSteps,
+      levels: [],
+      params: ['2t', '2d', 'rh2', 'vis', ...Object.keys(NBM_PARAMS)],
+      overrides: NBM_PARAMS,
+      extra: '',
+      regrid: { res: 0.03 },
+    }),
+    derived: {
+      tp: nbmTotal('tp', 'apcp1', 'apcp6'),
+      sf: nbmTotal('sf', 'asnow1', 'asnow6', 0.1), // snow depth → water at 10:1, so the 10:1 map shows NBM's own snowfall
+      ptype: nbmPtypeRecipe,
+    },
+    totalAt: nbmTotalAt,
+    notes: { tprate: '1 h mean', ptype: 'most likely type', sf: "NBM's own snow ratios" },
   },
   woofnam: {
     name: 'WOOF-NAM',
