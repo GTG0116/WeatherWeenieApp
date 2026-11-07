@@ -196,14 +196,17 @@ after 120 h, AIGFS is 6-hourly), the app says so instead of drawing something mi
 GEFS (6-hour buckets) and REFS (1-hour buckets) publish precipitation that restarts every
 bucket; their run totals are built by adding the buckets up.
 
-**Locally derived fields**, where a model doesn't publish one:
-* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles); from absolute vorticity for the
-  NCEP deterministic models
+**Locally derived fields**, only where a model doesn't publish one (a published field always
+wins over a recipe of the same name):
+* vorticity from u/v (AIFS, AIGFS, ICON, the ensembles, WOOF-NAM, GDPS away from the
+  200/250/500/700/850 hPa levels it publishes); from absolute vorticity for the NCEP
+  deterministic models
 * precip type from a warm-nose temperature-profile scheme (AIFS, AIGFS, AIFS ENS, GEPS, WOOF-NAM),
   NCEP's categorical rain/snow/sleet/freezing-rain flags (GFS, HRRR, RRFS, RAP, GEFS, REFS),
   or the weather code (ICON)
-* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEFS,
-  GEPS), or from the 1-hour bucket (REFS), or as a 1-hour mean from the 12-hour buckets (WOOF-NAM)
+* precip rate as a 6-hour mean from total precipitation (AIFS, AIGFS, AIFS ENS, GEPS), the
+  mean over the latest 3–6 h bucket (GEFS), or a 1-hour mean from the 12-hour buckets
+  (WOOF-NAM). REFS and NBM rates are their published 1-hour amounts, read as rates.
 * dew point from 2 m relative humidity (ICON, GEFS, GEPS)
 * ICON totals since F000, summed from its per-interval precipitation and snowfall
 * snowfall for models without a snowfall field: precipitation × snow share from precip type
@@ -340,7 +343,13 @@ The gear button (map buttons, or **Settings** in the sidebar) opens a drawer bes
   hillshade; rotate and tilt. The map's own place labels stay hidden: town names and city values
   are the app's on both engines. Model fields and radar are drawn by the same shader in Web Mercator
   for the area in view (`Globe.renderFlat`) and handed to MapLibre as a canvas source. Wind
-  particles and the 3D radar view need the WebGL globe.
+  particles and the 3D radar view need the WebGL globe. Bold, haloed coastlines are drawn over
+  the data on every style. On low-end devices (little memory, few cores, or a phone; `?lowend=1`
+  simulates one) MapLibre runs lighter: a smaller data canvas, no multisampling, 50m lines.
+  If the page dies with MapLibre on, or the GPU drops its context, the next load (or the
+  current page) falls back to the WebGL globe and says so, rather than crashing in a loop.
+  Memory budgets for decoded fields and running totals follow the device (`public/js/device.js`),
+  so a long run like GFS (209 hours) preloads only as many hours as fit.
 - **Size**: frame the map at a social media size (X, Instagram square/portrait, stories, Facebook,
   YouTube, 4:3 or custom). Only the map and what's drawn on it change: the sidebar, timeline and
   buttons stay put.

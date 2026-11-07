@@ -3,10 +3,11 @@
 // only costs one new interval.
 import { kucheraRatio } from './derived.js';
 import { MODELS, supports } from './models.js';
+import { CHECKPOINT_BUDGET, DEVICE } from './device.js';
 
 const PREFETCH = 4; // intervals fetched ahead of the one being summed
-const CHECKPOINTS = 24; // always kept per kind/run...
-const CHECKPOINT_BYTES = 768 * 2 ** 20; // ...and more, up to this much, so whole runs can loop
+const CHECKPOINTS = DEVICE.lowEnd ? 8 : 24; // always kept per kind/run...
+const CHECKPOINT_BYTES = CHECKPOINT_BUDGET; // ...and more, up to this much (by device), so whole runs can loop
 
 // Precip type codes (table 4.201)
 const isFreezing = (c) => c === 3 || c === 12;

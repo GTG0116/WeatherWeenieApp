@@ -77,8 +77,10 @@ const fragmentShader = /* glsl */ `
   uniform bool uHasContour;
   uniform bool uHasType;
   uniform bool uHasIso;
-  uniform int uScale;      // 0 linear, 1 log
+  uniform int uScale;      // 0 linear, 1 log, 2 knots (evenly spaced along the LUT)
   uniform vec2 uDomain;
+  uniform float uKnots[16];
+  uniform int uKnotCount;
   uniform float uLutRows;
   uniform float uOpacity;
   uniform float uContourInterval;
@@ -291,6 +293,19 @@ const fragmentShader = /* glsl */ `
       float t;
       if (uScale == 1) {
         t = (log(max(value, 1e-6)) - log(uDomain.x)) / (log(uDomain.y) - log(uDomain.x));
+      } else if (uScale == 2) {
+        // Piecewise linear between knots that sit evenly along the LUT (see Colormap).
+        t = 0.0;
+        float segs = float(uKnotCount - 1);
+        for (int i = 0; i < 15; i++) {
+          if (i >= uKnotCount - 1) break;
+          float a = uKnots[i];
+          float b = uKnots[i + 1];
+          if (value <= b || i == uKnotCount - 2) {
+            t = (float(i) + (value - a) / max(b - a, 1e-9)) / segs;
+            break;
+          }
+        }
       } else {
         t = (value - uDomain.x) / (uDomain.y - uDomain.x);
       }
@@ -419,6 +434,8 @@ export class Globe {
       uHasIso: { value: false },
       uScale: { value: 0 },
       uDomain: { value: new THREE.Vector2(0, 1) },
+      uKnots: { value: new Float32Array(16) },
+      uKnotCount: { value: 2 },
       uLutRows: { value: 1 },
       uOpacity: { value: 1 },
       uContourInterval: { value: 6 },
@@ -563,6 +580,15 @@ export class Globe {
     r.clear();
     r.render(this.flat.scene, this.flat.camera);
     return r.domElement;
+  }
+
+  /**
+   * Shrink the (hidden) canvas once renderFlat's picture has been copied out:
+   * its multisampled drawing buffer at map size is the biggest GPU allocation
+   * while MapLibre is on, and low-end devices can't keep it next to MapLibre's.
+   */
+  releaseFlat() {
+    if (this.ext) this.renderer.setSize(1, 1, false);
   }
 
   // ------------------------------------------------------------- image & video export
@@ -1131,8 +1157,13 @@ export class Globe {
       u.uLut.value = lut;
     }
     u.uLutRows.value = colormap.rows.length;
-    u.uScale.value = colormap.scale === 'log' ? 1 : 0;
+    u.uScale.value = colormap.scale === 'log' ? 1 : colormap.scale === 'knots' ? 2 : 0;
     u.uDomain.value.set(...colormap.domain);
+    if (colormap.knots) {
+      u.uKnots.value.fill(0);
+      u.uKnots.value.set(colormap.knots.slice(0, 16));
+      u.uKnotCount.value = Math.min(16, colormap.knots.length);
+    }
     u.uOpacity.value = opacity;
   }
 
@@ -1196,7 +1227,8 @@ export class Globe {
   #applyLod() {
     const alt = this.altitude;
     const close = alt < HI_RES_ALTITUDE;
-    if (alt < HI_RES_ALTITUDE * 1.4 && this.hiResRequest) {
+    // An attached map (MapLibre) draws its own lines: don't load the detailed ones here too.
+    if (!this.ext && alt < HI_RES_ALTITUDE * 1.4 && this.hiResRequest) {
       const fn = this.hiResRequest;
       this.hiResRequest = null;
       fn();

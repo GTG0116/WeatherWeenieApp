@@ -7,11 +7,17 @@
 // so city labels, radar markers, the sounding/cross-section tools and the
 // alert layer work the same on either engine.
 
+import { DEVICE } from '../device.js';
+
 const MAPLIBRE_VERSION = '5.6.0';
 const D2R = Math.PI / 180;
 const VIEW_K = 2 * Math.tan(16 * D2R) * 6371; // globe camera: km of ground per unit altitude (32° fov)
-const MAX_SIDE = 4096;
-const MAX_PIXELS = 9e6;
+// The data canvas: it exists three times over (the globe's hidden canvas, a 2D
+// copy and MapLibre's texture), so low-end devices get a much smaller one.
+const LOW = DEVICE.lowEnd;
+const MAX_SIDE = LOW ? 2048 : 4096;
+const MAX_PIXELS = LOW ? 2.5e6 : 9e6;
+const DATA_DPR = LOW ? 1 : 2;
 // While exporting: the view only (no margin for panning), at up to this size.
 const EXPORT_MAX_SIDE = 8192;
 const EXPORT_MAX_PIXELS = 40e6;
@@ -156,15 +162,29 @@ function linesToGeoJSON(buf) {
 }
 
 // App line layers drawn over the data, bottom to top. width: [zoom, px] stops;
-// casing: a contrasting halo under the line so it reads over any data colour;
-// boost: opacity multiplier on the globe's line theme; plainOnly: only drawn on
-// styles without their own coastlines.
+// casing: a contrasting halo under the line so it reads over any data colour
+// (haloAlpha: how strong); boost: opacity multiplier on the globe's line theme;
+// minOpacity: never fainter than this; plainOnly: only drawn on styles without
+// their own water; lite: the lighter file low-end devices load instead (every
+// line becomes GeoJSON in MapLibre's worker, and the detailed ones are big).
+// Lines load once the map is zoomed in to within a level of their minzoom.
 const APP_LINES = [
-  { name: 'lakes', file: 'lakes-10m', minzoom: 0, width: [0, 0.6, 6, 1.1, 10, 1.6], boost: 1.2, plainOnly: true },
-  { name: 'coast', file: 'coastline-10m', minzoom: 0, width: [0, 0.8, 6, 1.4, 10, 2], boost: 1.2, plainOnly: true },
+  { name: 'lakes', file: 'lakes-10m', lite: 'lakes-50m', minzoom: 0, width: [0, 0.6, 6, 1.1, 10, 1.6], boost: 1.2, plainOnly: true },
+  // Coastlines on every style, bold and haloed, so land and sea read through any data.
+  {
+    name: 'coast',
+    file: 'coastline-10m',
+    lite: 'coastline-50m',
+    minzoom: 0,
+    width: [0, 1.3, 3, 1.7, 6, 2.4, 9, 3, 12, 3.6],
+    casing: 2.6,
+    haloAlpha: 0.75,
+    boost: 1.3,
+    minOpacity: 0.95,
+  },
   { name: 'counties', file: 'counties-500k', minzoom: 5, width: [5, 0.45, 8, 0.9, 11, 1.4], boost: 1.6 },
-  { name: 'states', file: 'states-hi', minzoom: 2, width: [2, 0.45, 4, 0.65, 6, 1.1, 8, 1.7, 12, 2.4], casing: 1.2, boost: 1.4 },
-  { name: 'borders', file: 'borders-10m', minzoom: 0, width: [0, 1, 3, 1.7, 6, 2.5, 9, 3.2, 12, 4], casing: 2.4, boost: 2 },
+  { name: 'states', file: 'states-hi', lite: 'states-50m', minzoom: 2, width: [2, 0.45, 4, 0.65, 6, 1.1, 8, 1.7, 12, 2.4], casing: 1.2, boost: 1.4 },
+  { name: 'borders', file: 'borders-10m', lite: 'borders-50m', minzoom: 0, width: [0, 1, 3, 1.7, 6, 2.5, 9, 3.2, 12, 4], casing: 2.4, boost: 2 },
 ];
 const BOUNDARY_LINES = new Set(['counties', 'states', 'borders']);
 
@@ -223,20 +243,32 @@ export class MapLibreEngine {
       touchPitch: !!this.settings.rotate,
       maxPitch: 70,
       renderWorldCopies: true,
-      fadeDuration: 150,
-      canvasContextAttributes: { antialias: true }, // smoother border and alert lines
-      maxCanvasSize: [16384, 16384], // exports draw at 2-3x; the GPU's own limit still applies
+      fadeDuration: LOW ? 0 : 150,
+      // Smoother border and alert lines; multisampling costs low-end GPUs too much memory.
+      canvasContextAttributes: { antialias: !LOW },
+      ...(LOW ? { pixelRatio: Math.min(window.devicePixelRatio || 1, 1.5), maxTileCacheZoomLevels: 3 } : {}),
+      maxCanvasSize: LOW ? [8192, 8192] : [16384, 16384], // exports draw at 2-3x; the GPU's own limit still applies
     });
     if (!this.settings.rotate) this.map.touchZoomRotate.disableRotation();
     this.map.on('style.load', () => this.#onStyle());
     this.map.on('move', () => this.#moved());
-    this.map.on('moveend', () => this.#moved(true));
+    this.map.on('moveend', () => {
+      this.#moved(true);
+      if (this.linesPending) this.#addLines();
+    });
+    // The GPU gave up (out of memory, usually): let the app fall back to the globe
+    // rather than run on with a blank map, or crash and come back to the same thing.
+    this.map.on('webglcontextlost', () => this.hooks.onContextLost?.());
     this.map.on('error', (e) => {
       const msg = e?.error?.message ?? '';
       // Missing tiles or sprites are routine; a style that won't load isn't.
       if (/style/i.test(msg) && this.hooks.onError) this.hooks.onError(msg);
     });
-    await new Promise((resolve) => (this.map.loaded() ? resolve() : this.map.once('load', resolve)));
+    await new Promise((resolve, reject) => {
+      if (this.map.loaded()) return resolve();
+      this.map.once('load', resolve);
+      this.map.once('webglcontextlost', () => reject(new Error('the graphics card ran out of memory')));
+    });
     this.ready = true;
     this.globe.attachMap(this);
     if (this.centerOffset) this.setCenterOffset(this.centerOffset);
@@ -383,14 +415,31 @@ export class MapLibreEngine {
     const map = this.map;
     const gen = this.styleGen;
     const plain = this.#isPlain();
+    this.linesPending = false;
     for (const def of APP_LINES) {
-      const { name, file, minzoom } = def;
+      const { name, minzoom } = def;
       if (def.plainOnly && !plain) continue;
       const id = `app-line-${name}`;
+      if (map.getLayer(id)) continue;
+      if (map.getZoom() < minzoom - 1) {
+        this.linesPending = true; // loaded on a later moveend, zoomed in
+        continue;
+      }
+      const file = LOW && def.lite ? def.lite : def.file;
       this.lineData[name] ??= fetch(`data/geo/${file}.bin`)
-        .then((r) => r.arrayBuffer())
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status} for ${file}`);
+          return r.arrayBuffer();
+        })
         .then(linesToGeoJSON);
-      const data = await this.lineData[name];
+      let data;
+      try {
+        data = await this.lineData[name];
+      } catch (err) {
+        delete this.lineData[name];
+        console.error('map lines', err);
+        continue;
+      }
       // The style may have changed while the file loaded; that load adds its own.
       if (this.map !== map || this.styleGen !== gen || map.getLayer(id)) continue;
       if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data, tolerance: 0.3 });
@@ -403,7 +452,7 @@ export class MapLibreEngine {
             source: id,
             minzoom,
             layout,
-            paint: { 'line-color': '#000000', 'line-width': widthExpr(def.width, def.casing), 'line-opacity': 0.4, 'line-blur': 0.6 },
+            paint: { 'line-color': '#000000', 'line-width': widthExpr(def.width, def.casing), 'line-opacity': def.haloAlpha ?? 0.4, 'line-blur': 0.6 },
           },
           this.overlayBeforeId(),
         );
@@ -446,9 +495,10 @@ export class MapLibreEngine {
       if (hasCase) map.setPaintProperty(caseId, 'line-color', haloFor(color));
     }
     if (st.opacity !== undefined) {
-      const op = Math.min(1, st.opacity * def.boost);
+      const op = Math.max(def.minOpacity ?? 0, Math.min(1, st.opacity * def.boost));
       map.setPaintProperty(id, 'line-opacity', op);
-      if (hasCase) map.setPaintProperty(caseId, 'line-opacity', (color && haloFor(color) === '#ffffff' ? 0.3 : 0.5) * op);
+      const halo = def.haloAlpha ?? 0.5;
+      if (hasCase) map.setPaintProperty(caseId, 'line-opacity', (color && haloFor(color) === '#ffffff' ? halo * 0.6 : halo) * op);
     }
     map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
     if (hasCase) map.setLayoutProperty(caseId, 'visibility', visible ? 'visible' : 'none');
@@ -576,7 +626,7 @@ export class MapLibreEngine {
     if (!map || !map.getSource('wx-data')) return;
     const b = this.#wantedBounds();
     const z = map.getZoom();
-    const dpr = Math.max(Math.min(window.devicePixelRatio || 1, 2), this.exportScale || 0);
+    const dpr = Math.max(Math.min(window.devicePixelRatio || 1, DATA_DPR), this.exportScale || 0);
     const world = 512 * 2 ** z * dpr;
     const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2));
     let w = ((b.east - b.west) / 360) * world;
@@ -593,6 +643,7 @@ export class MapLibreEngine {
       this.canvas.height = h;
     } else this.ctx.clearRect(0, 0, w, h);
     this.ctx.drawImage(gl, 0, 0);
+    if (LOW && !this.exportScale) this.globe.releaseFlat();
     const src = map.getSource('wx-data');
     const prev = this.rendered?.b;
     if (!prev || prev.west !== b.west || prev.east !== b.east || prev.south !== b.south || prev.north !== b.north) src.setCoordinates(this.#coords(b));

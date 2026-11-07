@@ -169,10 +169,16 @@ function parseIdx(text) {
       // f[6..]: what else describes the message (NBM: "prob >0.254", "ens std dev"; GEFS: "ENS=+1")
       return { v: f[3], l: f[4], t: f[5], x: f.slice(6).filter(Boolean).join(':'), offset: Number(f[1]) };
     });
-  rows.forEach((r, i) => {
-    const next = rows.slice(i + 1).find((n) => n.offset > r.offset);
-    r.end = next ? next.offset - 1 : null;
-  });
+  // Each message ends where the next one at a higher offset starts. One backward pass
+  // (offsets only grow; rows of one multi-field message share theirs): GFS indexes
+  // have ~700 rows, and slicing the rest of the list for each row was quadratic.
+  let higher = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    const after = rows[i + 1];
+    if (after && after.offset > r.offset) higher = after.offset;
+    r.end = higher != null && higher > r.offset ? higher - 1 : null;
+  }
   return rows;
 }
 

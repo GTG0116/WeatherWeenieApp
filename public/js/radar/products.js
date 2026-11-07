@@ -1,7 +1,7 @@
 // Radar product catalogue: where each product comes from (Level III product
 // codes per radar type and tilt, or a Level II moment) and how it's drawn.
 // Values are in canonical units (dBZ, m/s, dB, °/km, mm, km, kg/m²); see units.js.
-import { Colormap, QPF_MM } from '../colormaps.js';
+import { Colormap, QPF_KNOTS_MM, QPF_MM } from '../colormaps.js';
 
 // Hydrometeor classes (Level III codes 10..140 in steps of 10).
 export const HC_CLASSES = [
@@ -125,7 +125,7 @@ export const RADAR_GROUPS = [
 ];
 
 const VEL_TICKS = (u) => (u === 'imperial' ? [-100, -60, -30, 0, 30, 60, 100] : [-50, -30, -15, 0, 15, 30, 50]);
-const PRECIP_TICKS = (u) => (u === 'imperial' ? [0.05, 0.1, 0.25, 0.5, 1, 2, 4] : [1, 2.5, 5, 10, 25, 50, 100]);
+const PRECIP_TICKS = (u) => (u === 'imperial' ? [0.1, 0.5, 1, 2, 4, 6, 8, 10, 15] : [2.5, 10, 25, 50, 100, 150, 200, 250, 380]);
 const HC_TICKS = () => HC_CLASSES.filter((c) => c[1] !== '—').map((c) => c[0]);
 const hcFormat = (v) => hcByCode[Math.round(v / 10) * 10]?.[2] ?? '—';
 const hcLabel = (v) => hcByCode[v]?.[1] ?? '';
@@ -201,17 +201,17 @@ export const RADAR_PRODUCTS = [
   {
     id: 'p1h', group: 'precip', name: '1-hour precipitation', short: '1H', precip: true,
     src: { 'WSR-88D': { l3: ['DAA'] } },
-    unit: 'ice', colormap: cmap('qpf', QPF_MM, { scale: 'log' }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
+    unit: 'ice', colormap: cmap('qpf', QPF_MM, { knots: QPF_KNOTS_MM }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
   },
   {
     id: 'p3h', group: 'precip', name: '3-hour precipitation', short: '3H', precip: true,
     src: { 'WSR-88D': { l3: ['DU3'] } },
-    unit: 'ice', colormap: cmap('qpf', QPF_MM, { scale: 'log' }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
+    unit: 'ice', colormap: cmap('qpf', QPF_MM, { knots: QPF_KNOTS_MM }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
   },
   {
     id: 'pst', group: 'precip', name: 'Storm total precipitation', short: 'STP', precip: true,
     src: { 'WSR-88D': { l3: ['DTA'] } },
-    unit: 'ice', colormap: cmap('qpf', QPF_MM, { scale: 'log' }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
+    unit: 'ice', colormap: cmap('qpf', QPF_MM, { knots: QPF_KNOTS_MM }), format: fmtPrecip, legendTicks: PRECIP_TICKS,
   },
   {
     id: 'eet', group: 'derived', name: 'Enhanced echo tops', short: 'EET',

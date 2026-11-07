@@ -4,10 +4,10 @@
 import { MODELS, ensembleMembers, modelFor, recipeFor, supports } from './models.js';
 import { parseProb, passes } from './probability.js';
 import { extractWindow } from './decode/window.js';
+import { FIELD_BUDGET } from './device.js';
 
-// Decoded fields kept in memory: enough for whole-run loops where the device allows.
-const GB = 2 ** 30;
-const MAX_BYTES = Math.round(Math.min(2.5, Math.max(1, (navigator.deviceMemory ?? 6) / 4)) * GB);
+// Decoded fields kept in memory: whole-run loops where the device allows (see device.js).
+const MAX_BYTES = Math.round(FIELD_BUDGET);
 const MIN_ENTRIES = 12; // never evict below this many, whatever their size
 // Raw GRIB bytes of the fields soundings and cross sections read, so a window
 // somewhere else in the same field only needs decoding again, not downloading.
