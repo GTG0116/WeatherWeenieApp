@@ -13,11 +13,14 @@ const MIN_ENTRIES = 12; // never evict below this many, whatever their size
 // somewhere else in the same field only needs decoding again, not downloading.
 const MAX_RAW_BYTES = Math.min(512 * 2 ** 20, MAX_BYTES / 4);
 const MEAN_BATCH = 5; // ensemble members fetched and summed per worker job
-const PROB_BATCH = 8; // ensemble members loaded at once for a probability
+const PROB_BATCH = 8; // ensemble members loaded at once for a probability or a mean of members
 // Totals built up bucket by bucket (GEFS precipitation, snow) are where a member's
 // next hours start from: kept this many hours either side of a probability's hour.
-const CHAIN_PARAMS = new Set(['tp', 'sf', 'sfb']);
+const CHAIN_PARAMS = new Set(['tp', 'sf']);
 const CHAIN_HOURS = 36;
+// A mean of members (GEFS snowfall) is the default view, so keep less: the next
+// hours only build on the latest bucket totals (31 members × 0.5° add up quickly).
+const MEAN_CHAIN = { before: 12, after: 6 };
 // Queue priority: interactive (sounding/cross-section) loads first, then the
 // forecast hour on screen, then background preloading.
 export const PRIORITY = { background: 0, interactive: 1 };
@@ -523,6 +526,7 @@ export class DataSource {
     const recipe = recipeFor(model, param, level, splitRun(run)[1]);
     const make = async () => {
       if (this.resolved.has(key)) return extractWindow(await this.#value(this.cache.get(key)), box);
+      if (this.#meanOfMembers(recipe, run)) return extractWindow(await this.field(model, run, step, { param, level }), box);
       if (recipe && !recipe.sum && !recipe.worker) {
         const ctx = { ...this.#ctx(model, run, step), level };
         const spec = recipe.needs(level, ctx);
@@ -576,6 +580,7 @@ export class DataSource {
       });
     }
     if (recipe?.sum) return this.#remember(key, () => this.#runningSum(model, run, step, param, recipe));
+    if (this.#meanOfMembers(recipe, run)) return this.#remember(key, () => this.#memberMean(model, run, step, param, level));
     if (recipe) {
       return this.#remember(key, async () => {
         const ctx = { ...this.#ctx(model, run, step), level };
@@ -670,18 +675,78 @@ export class DataSource {
     return field;
   }
 
+  /** Whether a recipe's ensemble mean is the average of each member's result (see models.js). */
+  #meanOfMembers(recipe, run) {
+    return !!recipe?.meanOfMembers && splitRun(run)[1] === 'mean';
+  }
+
   /**
-   * Drop the single-member fields a probability loaded (every member run of this
-   * run), except bucket-built totals near its hour, which later hours build on.
+   * The ensemble mean of a field each member computes itself (GEFS snowfall from
+   * its precipitation buckets × snow flag): every member's field, loaded as when
+   * that member is picked, averaged batch by batch. Members are swept as for a
+   * probability, and the finished mean is kept across visits.
    */
-  #sweepMembers(model, runId, step) {
+  async #memberMean(model, run, step, param, level) {
+    const key = `${model}/${run}/${step}/${param}/${level ?? 'sfc'}`;
+    const stored = await this.means.get(key);
+    if (stored) return unpack(stored);
+    const [runId] = splitRun(run);
+    const members = ensembleMembers(model);
+    let sum = null;
+    let meta = null;
+    let done = 0;
+    const failed = [];
+    try {
+      for (let i = 0; i < members.length; i += PROB_BATCH) {
+        await Promise.all(
+          members.slice(i, i + PROB_BATCH).map(async (m) => {
+            let f;
+            try {
+              f = await this.field(model, `${runId}~${m}`, step, { param, level });
+            } catch (err) {
+              if (err.message === CANCELLED) throw err;
+              failed.push(err);
+              return;
+            }
+            if (!sum) {
+              sum = new Float64Array(f.values.length);
+              meta = f.meta;
+            }
+            const v = f.values;
+            for (let k = 0; k < v.length; k++) sum[k] += v[k];
+            done++;
+            this.onProgress?.({ model, run, step, done, total: members.length, kind: 'mean' });
+          }),
+        );
+        this.#sweepMembers(model, runId, step, MEAN_CHAIN);
+      }
+    } finally {
+      this.#sweepMembers(model, runId, step, MEAN_CHAIN);
+    }
+    // A member or two missing still makes a fair mean; more doesn't.
+    if (!done || failed.length > members.length / 4) throw failed[0] ?? new Error('no ensemble members');
+    const values = new Float32Array(sum.length);
+    for (let k = 0; k < values.length; k++) values[k] = sum[k] / done;
+    const field = { values, meta, derived: true, members: done };
+    if (!failed.length) this.means.put(key, pack(field));
+    return field;
+  }
+
+  /**
+   * Drop the single-member fields a probability or a mean of members loaded (every
+   * member run of this run, not the mean's own fields), except bucket-built totals
+   * near its hour, which later hours build on.
+   */
+  #sweepMembers(model, runId, step, { before = CHAIN_HOURS, after = CHAIN_HOURS } = {}) {
     const prefix = `${model}/${runId}~`;
     for (const [key, e] of this.cache) {
       if (!key.startsWith(prefix) || !this.resolved.has(key)) continue;
       const [, run, s, param] = key.split('/');
       if (param.startsWith('prob:')) continue;
       const member = run.slice(run.indexOf('~') + 1);
-      if (CHAIN_PARAMS.has(param) && recipeFor(model, param, undefined, member) && Math.abs(Number(s) - step) <= CHAIN_HOURS) continue;
+      if (member === 'mean') continue;
+      const near = Number(s) >= step - before && Number(s) <= step + after;
+      if (CHAIN_PARAMS.has(param) && recipeFor(model, param, undefined, member) && near) continue;
       this.cache.delete(key);
       this.resolved.delete(key);
       this.bytes -= e.bytes;

@@ -31,7 +31,7 @@ export const PROB_KINDS = {
   /** Snowfall since F000 at 10:1 (cm): published snowfall, or (GEFS) its buckets × the snow flag. */
   snow: {
     thresholds: ['>=2.54', '>=5.08', '>=10.16', '>=15.24', '>=30.48', '>=45.72'], // 1, 2, 4, 6, 12, 18 in
-    inputs: (has) => (has('sf') ? { sf: { param: 'sf' } } : has('sfb') ? { sf: { param: 'sfb' } } : null),
+    inputs: (has) => (has('sf') ? { sf: { param: 'sf' } } : null),
     value: ({ sf }) => map(sf.values, (x) => Math.max(0, x) * 1000), // m water -> cm snow at 10:1
   },
   /** 2 m temperature, °C */
